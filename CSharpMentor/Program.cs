@@ -93,6 +93,38 @@ const string QuizSystemPrompt = """
 }
 """;
 
+const string ChallengeSystemPrompt = """
+Ты — тренер по C# который даёт задания на исправление сломанного кода.
+
+Правила генерации задания:
+1. Дай короткий рабочий C# код (5-15 строк) с ОДНОЙ намеренной ошибкой.
+2. Ошибка должна быть из базовых тем: синтаксис, типы данных, циклы, условия, методы, null.
+3. Уровень — начинающий (первые недели изучения C#).
+4. Ошибка должна быть реалистичной — такой которую реально делают новички.
+5. Отвечай СТРОГО в формате JSON:
+
+{
+  "description": "Краткое описание задачи что должен делать код",
+  "broken_code": "// сломанный C# код",
+  "error_hint": "Подсказка без спойлера — например: 'Посмотри на тип переменной'",
+  "fixed_code": "// правильный C# код",
+  "explanation": "Объяснение что было не так и почему"
+}
+""";
+
+const string InterviewSystemPrompt = """
+Ты — строгий технический интервьюер в IT-компании. Проводишь собеседование на позицию Junior C# разработчика.
+
+Правила:
+1. Задавай вопросы по одному, жди ответа студента.
+2. Темы: основы C#, ООП, коллекции, исключения, базовый LINQ, async/await.
+3. После ответа студента: оцени ответ (правильно/частично/неверно), дай краткое объяснение, задай следующий вопрос.
+4. Будь строгим но справедливым. Не подсказывай заранее.
+5. После 5 вопросов подведи итог: что знает хорошо, что нужно подтянуть, общая оценка.
+6. Первое сообщение: поприветствуй как интервьюер и задай первый вопрос.
+7. Формат строгий деловой, без лишних эмодзи.
+""";
+
 // ─────────────────────────────────────────────────────────────
 // Хранение состояния пользователей (в памяти)
 // ─────────────────────────────────────────────────────────────
@@ -377,6 +409,100 @@ InlineKeyboardMarkup GetQuizAnswerKeyboard() => new(new[]
     }
 });
 
+// Кнопки для challenge
+InlineKeyboardMarkup GetChallengeKeyboard() => new(new[]
+{
+    new[]
+    {
+        InlineKeyboardButton.WithCallbackData("💡 Подсказка", "challenge_hint"),
+        InlineKeyboardButton.WithCallbackData("✅ Показать ответ", "challenge_answer"),
+    },
+    new[]
+    {
+        InlineKeyboardButton.WithCallbackData("➡️ Новое задание", "challenge_next"),
+        InlineKeyboardButton.WithCallbackData("🚪 Выйти", "challenge_exit"),
+    }
+});
+
+// Кнопка выхода из интервью
+InlineKeyboardMarkup GetInterviewKeyboard() => new(new[]
+{
+    new[]
+    {
+        InlineKeyboardButton.WithCallbackData("🚪 Завершить интервью", "interview_exit"),
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// Gemini — генерация задания для challenge
+// ─────────────────────────────────────────────────────────────
+async Task<(string BrokenCode, string Hint, string FixedCode, string Explanation, string Description)?> GenerateChallengeAsync()
+{
+    if (string.IsNullOrWhiteSpace(apiKey)) return null;
+
+    var body = new
+    {
+        system_instruction = new { parts = new[] { new { text = ChallengeSystemPrompt } } },
+        contents = new[]
+        {
+            new { role = "user", parts = new[] { new { text = "Сгенерируй новое задание на исправление кода для начинающего C# разработчика." } } }
+        },
+        generationConfig = new { temperature = 1.0, maxOutputTokens = 1024, responseMimeType = "application/json" }
+    };
+
+    var raw = await CallGeminiAsync(body);
+    try
+    {
+        var json = raw.Trim();
+        if (json.StartsWith("```")) json = json.Split('\n', 2)[1];
+        if (json.EndsWith("```")) json = json[..json.LastIndexOf("```")];
+
+        using var doc = JsonDocument.Parse(json.Trim());
+        var root = doc.RootElement;
+        return (
+            root.GetProperty("broken_code").GetString() ?? "",
+            root.GetProperty("error_hint").GetString() ?? "",
+            root.GetProperty("fixed_code").GetString() ?? "",
+            root.GetProperty("explanation").GetString() ?? "",
+            root.GetProperty("description").GetString() ?? ""
+        );
+    }
+    catch (Exception ex)
+    {
+        logger.LogError("Ошибка парсинга challenge: {Msg}\nRaw: {Raw}", ex.Message, raw);
+        return null;
+    }
+}
+
+// Форматирует задание challenge для отправки
+string FormatChallenge(string description, string brokenCode) =>
+    $"🔧 *Задание: исправь код*\n\n" +
+    $"📋 *Что должен делать код:*\n{description}\n\n" +
+    $"❌ *Сломанный код:*\n```csharp\n{brokenCode}\n```\n\n" +
+    $"✏️ Напиши исправленный вариант или нажми кнопку:";
+
+// ─────────────────────────────────────────────────────────────
+// Gemini — интервью с историей
+// ─────────────────────────────────────────────────────────────
+async Task<string> ConductInterviewAsync(UserState state, string userMessage)
+{
+    if (string.IsNullOrWhiteSpace(apiKey)) return "❌ API-ключ Gemini не настроен.";
+
+    var contents = new List<object>();
+    foreach (var msg in state.InterviewHistory)
+        contents.Add(new { role = msg.Role, parts = new[] { new { text = msg.Text } } });
+    contents.Add(new { role = "user", parts = new[] { new { text = userMessage } } });
+
+    var body = new
+    {
+        system_instruction = new { parts = new[] { new { text = InterviewSystemPrompt } } },
+        contents,
+        generationConfig = new { temperature = 0.8, maxOutputTokens = 2048 }
+    };
+
+    return await CallGeminiAsync(body);
+}
+
 // ─────────────────────────────────────────────────────────────
 // Roadmap — план изучения C#
 // ─────────────────────────────────────────────────────────────
@@ -564,9 +690,72 @@ if (!string.IsNullOrWhiteSpace(botToken))
                             cancellationToken: ct);
                         break;
 
+                    // ── Challenge кнопки ──────────────────────
+                    case "challenge_hint":
+                    {
+                        // Извлекаем подсказку из сохранённого задания
+                        var hint = state.CurrentChallenge.Contains("||HINT||")
+                            ? state.CurrentChallenge.Split("||HINT||")[1].Split("||FIXED||")[0]
+                            : "Подсказка недоступна.";
+                        await bot.SendMessage(chatId, $"💡 *Подсказка:*\n{hint}",
+                            parseMode: ParseMode.Markdown, cancellationToken: ct);
+                        break;
+                    }
+
+                    case "challenge_answer":
+                    {
+                        var parts2 = state.CurrentChallenge.Split("||FIXED||");
+                        var fixedCode = parts2.Length > 1 ? parts2[1].Split("||EXPLAIN||")[0] : "";
+                        var explain   = parts2.Length > 1 && parts2[1].Contains("||EXPLAIN||")
+                            ? parts2[1].Split("||EXPLAIN||")[1] : "";
+                        await bot.SendMessage(chatId,
+                            $"✅ *Правильный код:*\n```csharp\n{fixedCode}\n```\n\n📖 *Объяснение:*\n{explain}",
+                            parseMode: ParseMode.Markdown,
+                            replyMarkup: GetChallengeKeyboard(),
+                            cancellationToken: ct);
+                        break;
+                    }
+
+                    case "challenge_next":
+                    {
+                        await bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
+                        var ch = await GenerateChallengeAsync();
+                        if (ch is null)
+                        {
+                            await bot.SendMessage(chatId, "❌ Не удалось сгенерировать задание.", cancellationToken: ct);
+                            break;
+                        }
+                        state.CurrentChallenge = $"{ch.Value.BrokenCode}||HINT||{ch.Value.Hint}||FIXED||{ch.Value.FixedCode}||EXPLAIN||{ch.Value.Explanation}";
+                        await bot.SendMessage(chatId, FormatChallenge(ch.Value.Description, ch.Value.BrokenCode),
+                            parseMode: ParseMode.Markdown,
+                            replyMarkup: GetChallengeKeyboard(),
+                            cancellationToken: ct);
+                        break;
+                    }
+
+                    case "challenge_exit":
+                        state.Mode = UserMode.Normal;
+                        state.CurrentChallenge = "";
+                        await bot.SendMessage(chatId,
+                            "Вышел из режима заданий. Задавай вопросы по C# 💬",
+                            cancellationToken: ct);
+                        break;
+
+                    // ── Interview кнопки ──────────────────────
+                    case "interview_exit":
+                    {
+                        state.Mode = UserMode.Normal;
+                        var qCount = state.InterviewQuestionCount;
+                        state.InterviewHistory.Clear();
+                        state.InterviewQuestionCount = 0;
+                        await bot.SendMessage(chatId,
+                            $"Интервью завершено досрочно после {qCount} вопр.\n\nЗадавай вопросы по C# 💬",
+                            cancellationToken: ct);
+                        break;
+                    }
+
                     case "quiz_answer_A":
-                    case "quiz_answer_B":
-                    case "quiz_answer_C":
+                    case "quiz_answer_B":                    case "quiz_answer_C":
                     case "quiz_answer_D":
                     {
                         var chosen = data.Replace("quiz_answer_", ""); // "A", "B", "C" или "D"
@@ -633,9 +822,10 @@ if (!string.IsNullOrWhiteSpace(botToken))
                     "📷 Разбирать скриншоты с кодом и ошибками\n" +
                     "📄 Анализировать .cs файлы\n" +
                     "🗺 Показать план изучения C# (/roadmap)\n" +
-                    "🎯 Проверять знания через квиз (/quiz)\n\n" +
-                    "Просто напиши вопрос! 🚀",
-                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                    "🎯 Проверять знания через квиз (/quiz)\n" +
+                    "🔧 Задания на исправление кода (/challenge)\n" +
+                    "🎤 Симуляция собеседования (/interview)\n\n" +
+                    "Просто напиши вопрос! 🚀",                    parseMode: ParseMode.Markdown, cancellationToken: ct);
                 return;
             }
 
@@ -646,7 +836,9 @@ if (!string.IsNullOrWhiteSpace(botToken))
                     "*Команды:*\n\n" +
                     "/start — начать заново\n" +
                     "/roadmap — план изучения C# 🗺\n" +
-                    "/quiz — режим проверки знаний 🎯\n" +
+                    "/quiz — проверка знаний 🎯\n" +
+                    "/challenge — задание: исправь код 🔧\n" +
+                    "/interview — симуляция собеседования 🎤\n" +
                     "/clear — очистить историю диалога\n" +
                     "/help — эта справка\n\n" +
                     "*Можно присылать:*\n" +
@@ -704,6 +896,48 @@ if (!string.IsNullOrWhiteSpace(botToken))
             {
                 await bot.SendMessage(msgChatId, RoadmapText,
                     parseMode: ParseMode.Markdown, cancellationToken: ct);
+                return;
+            }
+
+            // /challenge — задание на исправление кода
+            if (message.Text == "/challenge")
+            {
+                msgState.Mode = UserMode.Challenge;
+                await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
+                await bot.SendMessage(msgChatId,
+                    "🔧 *Режим заданий активирован!*\n\nЯ дам тебе сломанный C# код — найди и исправь ошибку.\nМожешь написать исправленный код или воспользоваться кнопками.",
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+
+                var ch = await GenerateChallengeAsync();
+                if (ch is null)
+                {
+                    await bot.SendMessage(msgChatId, "❌ Не удалось сгенерировать задание. Попробуй ещё раз.", cancellationToken: ct);
+                    return;
+                }
+                // Сохраняем всё задание для кнопок подсказки и ответа
+                msgState.CurrentChallenge = $"{ch.Value.BrokenCode}||HINT||{ch.Value.Hint}||FIXED||{ch.Value.FixedCode}||EXPLAIN||{ch.Value.Explanation}";
+                await bot.SendMessage(msgChatId, FormatChallenge(ch.Value.Description, ch.Value.BrokenCode),
+                    parseMode: ParseMode.Markdown,
+                    replyMarkup: GetChallengeKeyboard(),
+                    cancellationToken: ct);
+                return;
+            }
+
+            // /interview — симуляция технического собеседования
+            if (message.Text == "/interview")
+            {
+                msgState.Mode = UserMode.Interview;
+                msgState.InterviewHistory.Clear();
+                msgState.InterviewQuestionCount = 0;
+                await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
+                await bot.SendMessage(msgChatId,
+                    "🎤 *Режим технического собеседования*\n\nЯ буду задавать вопросы как на реальном Junior C# интервью. Отвечай своими словами — оценю и задам следующий вопрос.\n\nПосле 5 вопросов подведу итог.\n\nГотов? Начинаем!",
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+
+                // Первый вопрос от интервьюера
+                var firstQ = await ConductInterviewAsync(msgState, "Начни интервью. Поприветствуй и задай первый вопрос.");
+                msgState.InterviewHistory.Add(new ChatMessage("model", firstQ));
+                await SendAnswerAsync(bot, msgChatId, firstQ, ct, GetInterviewKeyboard());
                 return;
             }
 
@@ -779,12 +1013,56 @@ if (!string.IsNullOrWhiteSpace(botToken))
             {
                 logger.LogInformation("TG [{User}] [{Mode}]: {Text}", username, msgState.Mode, text);
 
-                // В режиме квиза текстовые ответы не принимаем — только кнопки
+                // В режиме квиза — только кнопки
                 if (msgState.Mode == UserMode.Quiz)
                 {
                     await bot.SendMessage(msgChatId,
                         "Выбери ответ нажав кнопку *A*, *B*, *C* или *D* 👆",
                         parseMode: ParseMode.Markdown, cancellationToken: ct);
+                    return;
+                }
+
+                // В режиме challenge — проверяем попытку студента
+                if (msgState.Mode == UserMode.Challenge)
+                {
+                    var brokenCode = msgState.CurrentChallenge.Contains("||HINT||")
+                        ? msgState.CurrentChallenge.Split("||HINT||")[0] : "";
+                    var fixedCode  = msgState.CurrentChallenge.Contains("||FIXED||")
+                        ? msgState.CurrentChallenge.Split("||FIXED||")[1].Split("||EXPLAIN||")[0] : "";
+                    var explain    = msgState.CurrentChallenge.Contains("||EXPLAIN||")
+                        ? msgState.CurrentChallenge.Split("||EXPLAIN||")[1] : "";
+
+                    var checkPrompt = $"Студент пытается исправить сломанный C# код.\n\n" +
+                                      $"Сломанный код:\n```csharp\n{brokenCode}\n```\n\n" +
+                                      $"Правильный код:\n```csharp\n{fixedCode}\n```\n\n" +
+                                      $"Ответ студента:\n```csharp\n{text}\n```\n\n" +
+                                      $"Оцени ответ студента: правильно ли он исправил ошибку? " +
+                                      $"Если да — похвали. Если нет или частично — объясни что не так. Будь конкретным.";
+
+                    var checkResult = await AskGeminiWithHistoryAsync(msgState, checkPrompt);
+                    await SendAnswerAsync(bot, msgChatId, checkResult, ct, GetChallengeKeyboard());
+                    return;
+                }
+
+                // В режиме interview — передаём ответ интервьюеру
+                if (msgState.Mode == UserMode.Interview)
+                {
+                    msgState.InterviewHistory.Add(new ChatMessage("user", text));
+                    msgState.InterviewQuestionCount++;
+
+                    var interviewReply = await ConductInterviewAsync(msgState, text);
+                    msgState.InterviewHistory.Add(new ChatMessage("model", interviewReply));
+
+                    // Держим историю интервью не более 20 сообщений
+                    if (msgState.InterviewHistory.Count > 20)
+                        msgState.InterviewHistory.RemoveAt(0);
+
+                    // После 5 ответов студента — завершаем
+                    var isFinished = msgState.InterviewQuestionCount >= 5;
+                    if (isFinished) msgState.Mode = UserMode.Normal;
+
+                    await SendAnswerAsync(bot, msgChatId, interviewReply, ct,
+                        isFinished ? null : GetInterviewKeyboard());
                     return;
                 }
 
@@ -863,7 +1141,7 @@ record AskRequest(string Question);
 // Типы данных (должны быть после top-level statements)
 // ─────────────────────────────────────────────────────────────
 
-enum UserMode { Normal, Quiz }
+enum UserMode { Normal, Quiz, Challenge, Interview }
 
 record ChatMessage(string Role, string Text);
 
@@ -897,4 +1175,9 @@ class UserState
     public int QuizTotal   { get; set; } = 0;
     // Темы уже заданных вопросов в этой сессии (для исключения повторений)
     public List<string> UsedQuizTopics { get; } = new();
+    // Challenge — текущее задание
+    public string CurrentChallenge { get; set; } = "";
+    // Interview — история диалога собеседования
+    public List<ChatMessage> InterviewHistory { get; } = new();
+    public int InterviewQuestionCount { get; set; } = 0;
 }
