@@ -107,8 +107,30 @@ void AddToHistory(UserState state, string role, string text)
 }
 
 // ─────────────────────────────────────────────────────────────
-// Inline-кнопки после ответа
+// Rate Limiting — не более 15 запросов в час на пользователя
 // ─────────────────────────────────────────────────────────────
+const int MaxRequestsPerHour = 15;
+
+bool IsRateLimited(UserState state)
+{
+    var now = DateTime.UtcNow;
+    // Чистим запросы старше 1 часа
+    state.RequestTimestamps.RemoveAll(t => (now - t).TotalHours >= 1);
+    return state.RequestTimestamps.Count >= MaxRequestsPerHour;
+}
+
+void TrackRequest(UserState state)
+{
+    state.RequestTimestamps.Add(DateTime.UtcNow);
+}
+
+string GetRateLimitMessage(UserState state)
+{
+    var oldest = state.RequestTimestamps.Min();
+    var resetIn = oldest.AddHours(1) - DateTime.UtcNow;
+    return $"⏳ Лимит запросов исчерпан ({MaxRequestsPerHour}/час).\n" +
+           $"Попробуй через {(int)resetIn.TotalMinutes + 1} мин.";
+}
 InlineKeyboardMarkup GetAnswerKeyboard() => new(new[]
 {
     new[]
@@ -290,6 +312,69 @@ async Task<string> GenerateQuizQuestionAsync()
 }
 
 // ─────────────────────────────────────────────────────────────
+// Roadmap — план изучения C#
+// ─────────────────────────────────────────────────────────────
+const string RoadmapText = """
+🗺 *Роадмап изучения C# — от нуля до Junior*
+
+━━━━━━━━━━━━━━━━━━━━━━
+*📦 Этап 1 — Основы* (2-3 недели)
+━━━━━━━━━━━━━━━━━━━━━━
+• Типы данных: int, string, bool, double
+• Переменные, константы, операторы
+• Условия: if / else / switch
+• Циклы: for / while / foreach
+• Массивы и коллекции (List, Dictionary)
+• Методы и параметры
+• Null и nullable типы
+
+━━━━━━━━━━━━━━━━━━━━━━
+*🏗 Этап 2 — ООП* (3-4 недели)
+━━━━━━━━━━━━━━━━━━━━━━
+• Классы и объекты
+• Конструкторы и свойства
+• Наследование и полиморфизм
+• Интерфейсы и абстрактные классы
+• Инкапсуляция (public / private / protected)
+• Перегрузка методов и операторов
+• Generics (List<T>, Dictionary<K,V>)
+
+━━━━━━━━━━━━━━━━━━━━━━
+*⚡ Этап 3 — Продвинутый C#* (3-4 недели)
+━━━━━━━━━━━━━━━━━━━━━━
+• Исключения (try / catch / finally)
+• Делегаты, события, лямбды
+• LINQ (Where, Select, OrderBy, GroupBy)
+• async / await и Task
+• Работа с файлами (File, Stream)
+• Строки и регулярные выражения
+
+━━━━━━━━━━━━━━━━━━━━━━
+*🌐 Этап 4 — .NET экосистема* (4-6 недель)
+━━━━━━━━━━━━━━━━━━━━━━
+• ASP.NET Core — создание веб-API
+• Entity Framework Core — работа с БД
+• Dependency Injection
+• NuGet — пакетный менеджер
+• Git и GitHub
+• Юнит-тесты (xUnit / NUnit)
+
+━━━━━━━━━━━━━━━━━━━━━━
+*💼 Этап 5 — Перед первой работой*
+━━━━━━━━━━━━━━━━━━━━━━
+• Паттерны проектирования (Repository, CQRS)
+• REST API, JSON, HTTP
+• Docker основы
+• Подготовка к техническому интервью
+
+━━━━━━━━━━━━━━━━━━━━━━
+💡 *Совет:* Практикуй каждую тему на реальных задачах.
+Задавай вопросы — я объясню любую тему из роадмапа!
+
+/quiz — проверь свои знания
+""";
+
+// ─────────────────────────────────────────────────────────────
 // Отправить ответ с разбивкой на части
 // ─────────────────────────────────────────────────────────────
 async Task SendAnswerAsync(ITelegramBotClient bot, long chatId, string answer,
@@ -416,6 +501,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
                     "🧠 Помню контекст нашего диалога\n" +
                     "📷 Разбирать скриншоты с кодом и ошибками\n" +
                     "📄 Анализировать .cs файлы\n" +
+                    "🗺 Показать план изучения C# (/roadmap)\n" +
                     "🎯 Проверять знания через квиз (/quiz)\n\n" +
                     "Просто напиши вопрос! 🚀",
                     parseMode: ParseMode.Markdown, cancellationToken: ct);
@@ -428,13 +514,15 @@ if (!string.IsNullOrWhiteSpace(botToken))
                 await bot.SendMessage(msgChatId,
                     "*Команды:*\n\n" +
                     "/start — начать заново\n" +
-                    "/quiz — режим проверки знаний\n" +
+                    "/roadmap — план изучения C# 🗺\n" +
+                    "/quiz — режим проверки знаний 🎯\n" +
                     "/clear — очистить историю диалога\n" +
                     "/help — эта справка\n\n" +
                     "*Можно присылать:*\n" +
                     "💬 Текстовый вопрос\n" +
                     "📷 Скриншот с кодом или ошибкой\n" +
-                    "📄 Файл .cs с кодом",
+                    "📄 Файл .cs с кодом\n\n" +
+                    $"⏳ Лимит: {MaxRequestsPerHour} запросов в час",
                     parseMode: ParseMode.Markdown, cancellationToken: ct);
                 return;
             }
@@ -463,9 +551,25 @@ if (!string.IsNullOrWhiteSpace(botToken))
                 return;
             }
 
+            // /roadmap — план изучения C#
+            if (message.Text == "/roadmap")
+            {
+                await bot.SendMessage(msgChatId, RoadmapText,
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                return;
+            }
+
+            // ── Rate Limiting ─────────────────────────────────
+            if (IsRateLimited(msgState))
+            {
+                await bot.SendMessage(msgChatId, GetRateLimitMessage(msgState), cancellationToken: ct);
+                return;
+            }
+            TrackRequest(msgState);
+
             await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
 
-            // ── Фото ─────────────────────────────────────────
+            // ── Фото
             if (message.Photo is { } photos && photos.Length > 0)
             {
                 logger.LogInformation("TG [{User}]: фото", username);
@@ -626,4 +730,6 @@ class UserState
     public string LastBotAnswer { get; set; } = "";
     public string LastUserQuestion { get; set; } = "";
     public DateTime LastActivity { get; set; } = DateTime.UtcNow;
+    // Для rate limiting — время каждого запроса за последний час
+    public List<DateTime> RequestTimestamps { get; } = new();
 }
