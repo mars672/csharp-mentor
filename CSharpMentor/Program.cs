@@ -545,7 +545,7 @@ InlineKeyboardMarkup GetAfterLessonKeyboard(string stage) => new(new[]
     },
     new[]
     {
-        InlineKeyboardButton.WithCallbackData("\U0001F4DD Задание по теме", "challenge_next"),
+        InlineKeyboardButton.WithCallbackData("\U0001F4DD Задание по теме", "challenge_by_topic"),
         InlineKeyboardButton.WithCallbackData("\U0001F3AF Квиз", "start_quiz"),
     }
 });
@@ -568,20 +568,31 @@ async Task<string> GenerateLessonAsync(string topic)
     };
     return await CallGeminiAsync(body);
 }
-async Task<(string BrokenCode, string Hint, string FixedCode, string Explanation, string Description, string Topic)?> GenerateChallengeAsync(List<string> usedTopics)
+async Task<(string BrokenCode, string Hint, string FixedCode, string Explanation, string Description, string Topic)?> GenerateChallengeAsync(List<string> usedTopics, string? forceTopic = null)
 {
     if (string.IsNullOrWhiteSpace(apiKey)) return null;
 
-    var usedHint = usedTopics.Count > 0
-        ? $"Уже использованные темы (НЕ повторяй): {string.Join(", ", usedTopics)}."
-        : "Это первое задание в сессии.";
+    string taskPrompt;
+    if (!string.IsNullOrWhiteSpace(forceTopic))
+    {
+        // Задание строго по теме урока
+        taskPrompt = $"Сгенерируй задание на исправление C# кода СТРОГО по теме «{forceTopic}». " +
+                     $"Ошибка должна быть напрямую связана с этой темой.";
+    }
+    else
+    {
+        var usedHint = usedTopics.Count > 0
+            ? $"Уже использованные темы (НЕ повторяй): {string.Join(", ", usedTopics)}."
+            : "Это первое задание в сессии.";
+        taskPrompt = $"Сгенерируй новое задание на исправление кода для начинающего C# разработчика. {usedHint}";
+    }
 
     var body = new
     {
         system_instruction = new { parts = new[] { new { text = ChallengeSystemPrompt } } },
         contents = new[]
         {
-            new { role = "user", parts = new[] { new { text = $"Сгенерируй новое задание на исправление кода для начинающего C# разработчика. {usedHint}" } } }
+            new { role = "user", parts = new[] { new { text = taskPrompt } } }
         },
         generationConfig = new { temperature = 1.0, maxOutputTokens = 1024, responseMimeType = "application/json" }
     };
@@ -895,9 +906,51 @@ if (!string.IsNullOrWhiteSpace(botToken))
                         state.Mode = UserMode.Normal;
                         state.CurrentChallenge = "";
                         await bot.SendMessage(chatId,
-                            "Вышел из режима заданий. Задавай вопросы по C# 💬",
+                            "Вышел из режима заданий. Задавай вопросы по C# \U0001F4AC",
                             cancellationToken: ct);
                         break;
+
+                    // Задание строго по теме последнего урока
+                    case "challenge_by_topic":
+                    {
+                        state.Mode = UserMode.Challenge;
+                        var topic2 = state.CurrentLearnTopic;
+                        await bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
+
+                        if (string.IsNullOrWhiteSpace(topic2))
+                        {
+                            // Тема не известна — обычное рандомное задание
+                            await bot.SendMessage(chatId,
+                                "\U0001F527 *Задание по коду*",
+                                parseMode: ParseMode.Markdown, cancellationToken: ct);
+                            var ch0 = await GenerateChallengeAsync(state.UsedChallengeTopics);
+                            if (ch0 != null)
+                            {
+                                if (!string.IsNullOrWhiteSpace(ch0.Value.Topic))
+                                    state.UsedChallengeTopics.Add(ch0.Value.Topic);
+                                state.CurrentChallenge = $"{ch0.Value.BrokenCode}||HINT||{ch0.Value.Hint}||FIXED||{ch0.Value.FixedCode}||EXPLAIN||{ch0.Value.Explanation}";
+                                await bot.SendMessage(chatId, FormatChallenge(ch0.Value.Description, ch0.Value.BrokenCode),
+                                    parseMode: ParseMode.Markdown, replyMarkup: GetChallengeKeyboard(), cancellationToken: ct);
+                            }
+                            break;
+                        }
+
+                        await bot.SendMessage(chatId,
+                            $"\U0001F527 *Задание по теме «{topic2}»*\n\nНайди и исправь ошибку:",
+                            parseMode: ParseMode.Markdown, cancellationToken: ct);
+
+                        // Передаём тему — задание будет строго по ней
+                        var ch = await GenerateChallengeAsync(state.UsedChallengeTopics, topic2);
+                        if (ch != null)
+                        {
+                            if (!string.IsNullOrWhiteSpace(ch.Value.Topic))
+                                state.UsedChallengeTopics.Add(ch.Value.Topic);
+                            state.CurrentChallenge = $"{ch.Value.BrokenCode}||HINT||{ch.Value.Hint}||FIXED||{ch.Value.FixedCode}||EXPLAIN||{ch.Value.Explanation}";
+                            await bot.SendMessage(chatId, FormatChallenge(ch.Value.Description, ch.Value.BrokenCode),
+                                parseMode: ParseMode.Markdown, replyMarkup: GetChallengeKeyboard(), cancellationToken: ct);
+                        }
+                        break;
+                    }
 
                     // ── Interview кнопки ──────────────────────
                     case "interview_exit":
@@ -963,6 +1016,9 @@ if (!string.IsNullOrWhiteSpace(botToken))
                             state.History.Clear(); // начинаем свежий контекст с этой темой
                             AddToHistory(state, "user",  $"Объясни тему: «{topic}» в C#");
                             AddToHistory(state, "model", lesson);
+
+                            // Запоминаем тему для кнопки "Задание по теме"
+                            state.CurrentLearnTopic = topic;
 
                             // Переключаем в Normal — вопросы после урока идут в обычный чат
                             state.Mode = UserMode.Normal;
@@ -1548,4 +1604,6 @@ class UserState
     public int InterviewQuestionCount { get; set; } = 0;
     // Learn — текущий выбранный этап
     public string CurrentLearnStage { get; set; } = "";
+    // Текущая тема урока (для задания по теме)
+    public string CurrentLearnTopic { get; set; } = "";
 }
