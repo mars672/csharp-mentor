@@ -1180,6 +1180,81 @@ if (!string.IsNullOrWhiteSpace(botToken))
                         break;
 
                     default:
+                        // duel_accept_{code} — принять вызов на дуэль
+                        if (data.StartsWith("duel_accept_"))
+                        {
+                            var code = data.Replace("duel_accept_", "");
+
+                            if (userDuels.ContainsKey(userId))
+                            {
+                                await bot.AnswerCallbackQuery(query.Id,
+                                    "Ты уже в дуэли!", showAlert: true, cancellationToken: ct);
+                                break;
+                            }
+                            if (!duelRooms.TryGetValue(code, out var acceptRoom))
+                            {
+                                await bot.AnswerCallbackQuery(query.Id,
+                                    "Вызов уже принят или истёк.", showAlert: true, cancellationToken: ct);
+                                break;
+                            }
+                            if (acceptRoom.Status != DuelStatus.WaitingForOpponent)
+                            {
+                                await bot.AnswerCallbackQuery(query.Id,
+                                    "Вызов уже принят кем-то другим.", showAlert: true, cancellationToken: ct);
+                                break;
+                            }
+                            if (acceptRoom.Player1Id == userId)
+                            {
+                                await bot.AnswerCallbackQuery(query.Id,
+                                    "Нельзя принять свой собственный вызов.", showAlert: true, cancellationToken: ct);
+                                break;
+                            }
+
+                            // Принимаем
+                            acceptRoom.Player2Id   = userId;
+                            acceptRoom.Player2Name = state.Username.Length > 0 ? state.Username : "Игрок 2";
+                            acceptRoom.Status      = DuelStatus.InProgress;
+                            userDuels[userId]      = code;
+
+                            await bot.AnswerCallbackQuery(query.Id, cancellationToken: ct);
+
+                            await bot.SendMessage(chatId,
+                                $"\u2694\uFE0F *Дуэль принята!* Генерирую вопросы...",
+                                parseMode: ParseMode.Markdown, cancellationToken: ct);
+                            await bot.SendMessage(acceptRoom.Player1Id,
+                                $"\u2694\uFE0F *{acceptRoom.Player2Name}* принял твой вызов! Дуэль начинается!",
+                                parseMode: ParseMode.Markdown, cancellationToken: ct);
+
+                            // Генерируем 5 вопросов
+                            var tmpTopics2    = new List<string>();
+                            var tmpQuestions2 = new List<string>();
+                            for (int i = 0; i < DuelRoom.TotalQuestions; i++)
+                            {
+                                var dq = await GenerateQuizQuestionAsync(tmpTopics2, tmpQuestions2);
+                                if (dq != null)
+                                {
+                                    acceptRoom.Questions.Add(dq);
+                                    if (!string.IsNullOrWhiteSpace(dq.Topic)) tmpTopics2.Add(dq.Topic);
+                                    tmpQuestions2.Add(dq.Question.Length > 80 ? dq.Question[..80] : dq.Question);
+                                }
+                            }
+
+                            if (acceptRoom.Questions.Count == 0)
+                            {
+                                await bot.SendMessage(chatId, "❌ Не удалось сгенерировать вопросы.", cancellationToken: ct);
+                                duelRooms.TryRemove(code, out var dr1);
+                                userDuels.TryRemove(acceptRoom.Player1Id, out var du1);
+                                userDuels.TryRemove(userId, out var du2);
+                                break;
+                            }
+
+                            acceptRoom.Player1Answered = 0;
+                            acceptRoom.Player2Answered = 0;
+                            await SendDuelQuestion(bot, acceptRoom.Player1Id, acceptRoom, 0, ct);
+                            await SendDuelQuestion(bot, chatId, acceptRoom, 0, ct);
+                            break;
+                        }
+
                         // duel_ans_{code}_{qIndex}_{choice} — ответ в дуэли
                         if (data.StartsWith("duel_ans_"))
                         {
@@ -1556,21 +1631,64 @@ if (!string.IsNullOrWhiteSpace(botToken))
 
                     var room = new DuelRoom
                     {
-                        Code       = code,
-                        Player1Id  = msgUserId,
+                        Code        = code,
+                        Player1Id   = msgUserId,
                         Player1Name = username
                     };
                     duelRooms[code]      = room;
                     userDuels[msgUserId] = code;
 
+                    // Сообщение создателю
                     await bot.SendMessage(msgChatId,
-                        $"\u2694\uFE0F *Дуэль создана!*\n\n" +
-                        $"Твой код: `{code}`\n\n" +
-                        $"Отправь этот код сопернику — пусть введёт:\n`/duel {code}`\n\n" +
-                        $"Жду соперника...",
+                        $"\u2694\uFE0F *Вызов брошен!*\n\n" +
+                        $"Рассылаю вызов всем активным игрокам...\n" +
+                        $"Или поделись кодом вручную: `{code}`\n\n" +
+                        $"Жду соперника (5 минут)...",
                         parseMode: ParseMode.Markdown, cancellationToken: ct);
 
-                    // Автоотмена через 5 минут если никто не присоединился
+                    // Рассылаем вызов всем активным пользователям (кроме самого игрока)
+                    var challengeKeyboard = new InlineKeyboardMarkup(new[]
+                    {
+                        new[]
+                        {
+                            InlineKeyboardButton.WithCallbackData(
+                                $"\u2694\uFE0F Принять вызов от {username}",
+                                $"duel_accept_{code}")
+                        }
+                    });
+
+                    var notified = 0;
+                    var activeUsers = userStates
+                        .Where(kv => kv.Key != msgUserId
+                            && !userDuels.ContainsKey(kv.Key)
+                            && (DateTime.UtcNow - kv.Value.LastActivity).TotalHours < 24)
+                        .ToList();
+
+                    foreach (var (uid, _) in activeUsers)
+                    {
+                        try
+                        {
+                            await bot.SendMessage(uid,
+                                $"\u2694\uFE0F *Вызов на дуэль!*\n\n" +
+                                $"*{username}* бросает тебе вызов по C#!\n" +
+                                $"5 вопросов — кто знает лучше?\n\n" +
+                                $"Нажми кнопку чтобы принять:",
+                                parseMode: ParseMode.Markdown,
+                                replyMarkup: challengeKeyboard,
+                                cancellationToken: ct);
+                            notified++;
+                        }
+                        catch { /* пользователь заблокировал бота */ }
+                    }
+
+                    if (notified == 0)
+                    {
+                        await bot.SendMessage(msgChatId,
+                            "Активных игроков сейчас нет. Поделись кодом с другом!",
+                            cancellationToken: ct);
+                    }
+
+                    // Автоотмена через 5 минут
                     _ = Task.Delay(TimeSpan.FromMinutes(5)).ContinueWith(t =>
                     {
                         if (duelRooms.TryGetValue(code, out var r) && r.Status == DuelStatus.WaitingForOpponent)
@@ -1578,7 +1696,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
                             duelRooms.TryRemove(code, out var removed1);
                             userDuels.TryRemove(msgUserId, out var removed2);
                             bot.SendMessage(msgChatId,
-                                $"\u23F0 Дуэль `{code}` отменена — никто не присоединился за 5 минут.",
+                                $"\u23F0 Вызов истёк — никто не принял за 5 минут.",
                                 parseMode: ParseMode.Markdown).Wait();
                         }
                     });
