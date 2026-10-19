@@ -839,14 +839,14 @@ if (!string.IsNullOrWhiteSpace(botToken))
                 // Главное меню — кнопки-плитки внизу экрана
                 var mainMenu = new ReplyKeyboardMarkup(new[]
                 {
-                    new[] { new KeyboardButton("🎯 Квиз"),          new KeyboardButton("� Задание") },
-                    new[] { new KeyboardButton("🎤 Собеседование"),  new KeyboardButton("🗺 Роадмап") },
-                    new[] { new KeyboardButton("❓ Помощь") },
+                    new[] { new KeyboardButton("\U0001F3AF Квиз"),         new KeyboardButton("\U0001F527 Задание") },
+                    new[] { new KeyboardButton("\U0001F3A4 Собеседование"), new KeyboardButton("\U0001F5FA Роадмап") },
+                    new[] { new KeyboardButton("\u2753 Помощь") },
                 })
                 { ResizeKeyboard = true, OneTimeKeyboard = false };
 
                 await bot.SendMessage(msgChatId,
-                    $"� Привет, *{username}*!\n\n" +
+                    $"\U0001F44B Привет, *{username}*!\n\n" +
                     "Я — *C# Mentor*, твой ИИ-помощник по языку C#.\n\n" +
                     "Выбери режим кнопкой или просто задай вопрос:",
                     parseMode: ParseMode.Markdown,
@@ -1044,12 +1044,12 @@ if (!string.IsNullOrWhiteSpace(botToken))
                 // ── Обработка кнопок главного меню ───────────
                 var menuAction = text switch
                 {
-                    "🎯 Квиз"          => "/quiz",
-                    "🔧 Задание"       => "/challenge",
-                    "🎤 Собеседование" => "/interview",
-                    "🗺 Роадмап"       => "/roadmap",
-                    "❓ Помощь"        => "/help",
-                    _                  => null
+                    "\U0001F3AF Квиз"          => "/quiz",
+                    "\U0001F527 Задание"        => "/challenge",
+                    "\U0001F3A4 Собеседование"  => "/interview",
+                    "\U0001F5FA Роадмап"        => "/roadmap",
+                    "\u2753 Помощь"             => "/help",
+                    _                           => null
                 };
                 if (menuAction != null)
                 {
