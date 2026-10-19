@@ -957,8 +957,23 @@ if (!string.IsNullOrWhiteSpace(botToken))
 
                             var lesson = await GenerateLessonAsync(topic);
                             var stage2 = state.CurrentLearnStage;
+
+                            // Сохраняем тему и урок в историю диалога —
+                            // после этого студент может задавать вопросы по теме
+                            state.History.Clear(); // начинаем свежий контекст с этой темой
+                            AddToHistory(state, "user",  $"Объясни тему: «{topic}» в C#");
+                            AddToHistory(state, "model", lesson);
+
+                            // Переключаем в Normal — вопросы после урока идут в обычный чат
+                            state.Mode = UserMode.Normal;
+
                             await SendAnswerAsync(bot, chatId, lesson, ct,
                                 string.IsNullOrEmpty(stage2) ? null : GetAfterLessonKeyboard(stage2));
+
+                            // Подсказка что можно задавать вопросы
+                            await bot.SendMessage(chatId,
+                                "\U0001F4AC Можешь задать любой вопрос по этой теме — я помню контекст урока.",
+                                cancellationToken: ct);
                         }
                         break;
 
