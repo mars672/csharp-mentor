@@ -103,6 +103,47 @@ const string QuizSystemPrompt = """
 }
 """;
 
+const string DuelQuizSystemPrompt = """
+Ты — экзаменатор по C# для дуэлей между игроками. Генерируй разнообразные вопросы по ВСЕМ темам C#.
+
+Темы (выбирай случайно, максимальное разнообразие):
+- Типы данных и переменные
+- Условия и циклы
+- Методы и параметры
+- Массивы и коллекции (List, Dictionary, HashSet)
+- Строки и их методы
+- ООП: классы, наследование, полиморфизм, интерфейсы
+- Исключения (try/catch/finally)
+- Делегаты и события
+- LINQ (Where, Select, FirstOrDefault, OrderBy, Count)
+- async/await и Task
+- Generics
+- Null-операторы (??, ?., !)
+- Паттерны matching (switch expressions, is, as)
+- Работа с файлами
+- Атрибуты и рефлексия
+
+Правила:
+1. Вопрос про КОНКРЕТНОЕ поведение кода — что выведет, что вернёт, что произойдёт.
+2. РОВНО 4 варианта: A, B, C, D. Только один правильный.
+3. Уровень сложности — MIX: 40% простые, 40% средние, 20% сложные.
+4. Каждый вопрос УНИКАЛЕН — не повторяй уже использованные вопросы.
+5. Код в вопросе должен быть нетривиальным — пусть игрок реально подумает.
+6. Отвечай СТРОГО в формате JSON:
+
+{
+  "question": "Текст вопроса",
+  "code": "// C# код если нужен, иначе пустая строка",
+  "a": "Вариант A",
+  "b": "Вариант B",
+  "c": "Вариант C",
+  "d": "Вариант D",
+  "correct": "A",
+  "explanation": "Краткое объяснение почему этот ответ верный",
+  "topic": "Тема вопроса"
+}
+""";
+
 const string ChallengeSystemPrompt = """
 Ты — тренер по C# который даёт задания на исправление сломанного кода.
 
@@ -626,6 +667,45 @@ async Task<QuizQuestion?> GenerateQuizQuestionAsync(List<string> usedTopics, Lis
     catch (Exception ex)
     {
         logger.LogError("Ошибка парсинга квиза: {Msg}\nRaw: {Raw}", ex.Message, raw);
+        return null;
+    }
+}
+
+// Генерация вопроса для ДУЭЛИ — широкий охват тем, повышенная сложность
+async Task<QuizQuestion?> GenerateDuelQuestionAsync(List<string> usedTopics, List<string> usedQuestions)
+{
+    if (string.IsNullOrWhiteSpace(apiKey)) return null;
+
+    var usedHint = usedTopics.Count > 0
+        ? $"Уже использованные темы (избегай их): {string.Join(", ", usedTopics)}."
+        : "Это первый вопрос дуэли.";
+
+    var questionsHint = usedQuestions.Count > 0
+        ? $"\nЭти вопросы уже были (НЕ повторяй):\n- {string.Join("\n- ", usedQuestions.TakeLast(20))}"
+        : "";
+
+    var body = new
+    {
+        system_instruction = new { parts = new[] { new { text = DuelQuizSystemPrompt } } },
+        contents = new[]
+        {
+            new { role = "user", parts = new[] { new { text = $"Сгенерируй уникальный вопрос для дуэли. {usedHint}{questionsHint}" } } }
+        },
+        generationConfig = new { temperature = 1.3, maxOutputTokens = 1024, responseMimeType = "application/json" }
+    };
+
+    var raw = await CallGeminiAsync(body);
+    try
+    {
+        var json = raw.Trim();
+        if (json.StartsWith("```")) json = json.Split('\n', 2)[1];
+        if (json.EndsWith("```")) json = json[..json.LastIndexOf("```")];
+        return JsonSerializer.Deserialize<QuizQuestion>(json.Trim(),
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    }
+    catch (Exception ex)
+    {
+        logger.LogError("Ошибка парсинга duel quiz: {Msg}", ex.Message);
         return null;
     }
 }
@@ -1233,7 +1313,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
                             var tmpQuestions2 = new List<string>();
                             for (int i = 0; i < DuelRoom.TotalQuestions; i++)
                             {
-                                var dq = await GenerateQuizQuestionAsync(tmpTopics2, tmpQuestions2);
+                                var dq = await GenerateDuelQuestionAsync(tmpTopics2, tmpQuestions2);
                                 if (dq != null)
                                 {
                                     acceptRoom.Questions.Add(dq);
@@ -1748,12 +1828,12 @@ if (!string.IsNullOrWhiteSpace(botToken))
                         $"\u2694\uFE0F *{username}* принял твой вызов! Дуэль начинается!",
                         parseMode: ParseMode.Markdown, cancellationToken: ct);
 
-                    // Генерируем 5 уникальных вопросов
+                    // Генерируем 5 уникальных вопросов для дуэли (широкий охват тем)
                     var tmpTopics = new List<string>();
                     var tmpQuestions = new List<string>();
                     for (int i = 0; i < DuelRoom.TotalQuestions; i++)
                     {
-                        var q = await GenerateQuizQuestionAsync(tmpTopics, tmpQuestions);
+                        var q = await GenerateDuelQuestionAsync(tmpTopics, tmpQuestions);
                         if (q != null)
                         {
                             room.Questions.Add(q);
