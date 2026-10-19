@@ -713,6 +713,10 @@ async Task SendAnswerAsync(ITelegramBotClient bot, long chatId, string answer,
 {
     const int maxLen = 4000;
 
+    // Защита от пустого ответа
+    if (string.IsNullOrWhiteSpace(answer))
+        answer = "⚠️ Получен пустой ответ. Попробуй ещё раз.";
+
     async Task SendChunk(string chunk, bool withKeyboard)
     {
         try
@@ -722,11 +726,19 @@ async Task SendAnswerAsync(ITelegramBotClient bot, long chatId, string answer,
                 replyMarkup: withKeyboard ? keyboard : null,
                 cancellationToken: ct);
         }
-        catch
+        catch (Exception ex1)
         {
-            await bot.SendMessage(chatId, chunk,
-                replyMarkup: withKeyboard ? keyboard : null,
-                cancellationToken: ct);
+            logger.LogWarning("Markdown отправка не удалась: {Msg}", ex1.Message);
+            try
+            {
+                await bot.SendMessage(chatId, chunk,
+                    replyMarkup: withKeyboard ? keyboard : null,
+                    cancellationToken: ct);
+            }
+            catch (Exception ex2)
+            {
+                logger.LogError("Отправка сообщения не удалась совсем: {Msg}", ex2.Message);
+            }
         }
     }
 
@@ -758,6 +770,8 @@ if (!string.IsNullOrWhiteSpace(botToken))
     botClient.StartReceiving(
         updateHandler: async (bot, update, ct) =>
         {
+        try
+        {
             // ── Обработка нажатий на inline-кнопки ──────────
             if (update.CallbackQuery is { } query)
             {
@@ -778,6 +792,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
 
                     case "another_example":
                         await bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
+                        AddToHistory(state, "user", "Покажи ещё один пример по той же теме, другой и более наглядный.");
                         var anotherEx = await AskGeminiWithHistoryAsync(state,
                             "Покажи ещё один пример по той же теме, другой и более наглядный.");
                         AddToHistory(state, "model", anotherEx);
@@ -786,6 +801,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
 
                     case "explain_simpler":
                         await bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
+                        AddToHistory(state, "user", "Объясни то же самое проще, как будто я новичок.");
                         var simpler = await AskGeminiWithHistoryAsync(state,
                             "Объясни то же самое, но ещё проще — как будто я полный новичок. Используй бытовую аналогию.");
                         AddToHistory(state, "model", simpler);
@@ -1395,8 +1411,13 @@ if (!string.IsNullOrWhiteSpace(botToken))
 
             // Всё остальное (стикеры, голосовые и т.д.)
             await bot.SendMessage(msgChatId,
-                "Понимаю текст, фото и .cs файлы.\nГолосовые пока не поддерживаю 🎤",
+                "Понимаю текст, фото и .cs файлы.\nГолосовые пока не поддерживаю \U0001F3A4",
                 cancellationToken: ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Необработанное исключение в updateHandler");
+        }
         },
 
         errorHandler: (bot, ex, src, ct) =>
