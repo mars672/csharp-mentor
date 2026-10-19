@@ -107,9 +107,9 @@ void AddToHistory(UserState state, string role, string text)
 }
 
 // ─────────────────────────────────────────────────────────────
-// Rate Limiting — не более 15 запросов в час на пользователя
+// Rate Limiting — не более 25 запросов в час на пользователя
 // ─────────────────────────────────────────────────────────────
-const int MaxRequestsPerHour = 15;
+const int MaxRequestsPerHour = 25;
 
 bool IsRateLimited(UserState state)
 {
