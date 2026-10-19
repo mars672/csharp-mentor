@@ -96,17 +96,29 @@ const string QuizSystemPrompt = """
 const string ChallengeSystemPrompt = """
 Ты — тренер по C# который даёт задания на исправление сломанного кода.
 
+Темы заданий (чередуй, не повторяй использованные):
+- Неверный тип переменной
+- Ошибка в условии if/else
+- Ошибка в цикле (for, while, foreach)
+- Ошибка в объявлении/вызове метода
+- Выход за границы массива
+- NullReferenceException
+- Неверный оператор сравнения (= вместо ==)
+- Ошибка в работе со строками
+- Ошибка с List<T>
+- Неверное возвращаемое значение метода
+
 Правила генерации задания:
-1. Дай короткий рабочий C# код (5-15 строк) с ОДНОЙ намеренной ошибкой.
-2. Ошибка должна быть из базовых тем: синтаксис, типы данных, циклы, условия, методы, null.
-3. Уровень — начинающий (первые недели изучения C#).
-4. Ошибка должна быть реалистичной — такой которую реально делают новички.
-5. Отвечай СТРОГО в формате JSON:
+1. Дай короткий C# код (5-15 строк) с ОДНОЙ намеренной ошибкой из темы.
+2. Уровень — начинающий (первые недели изучения C#).
+3. Ошибка реалистичная — такую реально делают новички.
+4. Отвечай СТРОГО в формате JSON:
 
 {
+  "topic": "Название темы из списка выше",
   "description": "Краткое описание задачи что должен делать код",
   "broken_code": "// сломанный C# код",
-  "error_hint": "Подсказка без спойлера — например: 'Посмотри на тип переменной'",
+  "error_hint": "Подсказка без спойлера",
   "fixed_code": "// правильный C# код",
   "explanation": "Объяснение что было не так и почему"
 }
@@ -436,16 +448,20 @@ InlineKeyboardMarkup GetInterviewKeyboard() => new(new[]
 // ─────────────────────────────────────────────────────────────
 // Gemini — генерация задания для challenge
 // ─────────────────────────────────────────────────────────────
-async Task<(string BrokenCode, string Hint, string FixedCode, string Explanation, string Description)?> GenerateChallengeAsync()
+async Task<(string BrokenCode, string Hint, string FixedCode, string Explanation, string Description, string Topic)?> GenerateChallengeAsync(List<string> usedTopics)
 {
     if (string.IsNullOrWhiteSpace(apiKey)) return null;
+
+    var usedHint = usedTopics.Count > 0
+        ? $"Уже использованные темы (НЕ повторяй): {string.Join(", ", usedTopics)}."
+        : "Это первое задание в сессии.";
 
     var body = new
     {
         system_instruction = new { parts = new[] { new { text = ChallengeSystemPrompt } } },
         contents = new[]
         {
-            new { role = "user", parts = new[] { new { text = "Сгенерируй новое задание на исправление кода для начинающего C# разработчика." } } }
+            new { role = "user", parts = new[] { new { text = $"Сгенерируй новое задание на исправление кода для начинающего C# разработчика. {usedHint}" } } }
         },
         generationConfig = new { temperature = 1.0, maxOutputTokens = 1024, responseMimeType = "application/json" }
     };
@@ -464,7 +480,8 @@ async Task<(string BrokenCode, string Hint, string FixedCode, string Explanation
             root.GetProperty("error_hint").GetString() ?? "",
             root.GetProperty("fixed_code").GetString() ?? "",
             root.GetProperty("explanation").GetString() ?? "",
-            root.GetProperty("description").GetString() ?? ""
+            root.GetProperty("description").GetString() ?? "",
+            root.TryGetProperty("topic", out var t) ? t.GetString() ?? "" : ""
         );
     }
     catch (Exception ex)
@@ -719,12 +736,17 @@ if (!string.IsNullOrWhiteSpace(botToken))
                     case "challenge_next":
                     {
                         await bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
-                        var ch = await GenerateChallengeAsync();
+                        var ch = await GenerateChallengeAsync(state.UsedChallengeTopics);
                         if (ch is null)
                         {
                             await bot.SendMessage(chatId, "❌ Не удалось сгенерировать задание.", cancellationToken: ct);
                             break;
                         }
+                        // Запоминаем тему
+                        if (!string.IsNullOrWhiteSpace(ch.Value.Topic))
+                            state.UsedChallengeTopics.Add(ch.Value.Topic);
+                        if (state.UsedChallengeTopics.Count >= 10)
+                            state.UsedChallengeTopics.Clear();
                         state.CurrentChallenge = $"{ch.Value.BrokenCode}||HINT||{ch.Value.Hint}||FIXED||{ch.Value.FixedCode}||EXPLAIN||{ch.Value.Explanation}";
                         await bot.SendMessage(chatId, FormatChallenge(ch.Value.Description, ch.Value.BrokenCode),
                             parseMode: ParseMode.Markdown,
@@ -907,18 +929,20 @@ if (!string.IsNullOrWhiteSpace(botToken))
             if (message.Text == "/challenge")
             {
                 msgState.Mode = UserMode.Challenge;
+                msgState.UsedChallengeTopics.Clear();
                 await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
                 await bot.SendMessage(msgChatId,
                     "🔧 *Режим заданий активирован!*\n\nЯ дам тебе сломанный C# код — найди и исправь ошибку.\nМожешь написать исправленный код или воспользоваться кнопками.",
                     parseMode: ParseMode.Markdown, cancellationToken: ct);
 
-                var ch = await GenerateChallengeAsync();
+                var ch = await GenerateChallengeAsync(msgState.UsedChallengeTopics);
                 if (ch is null)
                 {
                     await bot.SendMessage(msgChatId, "❌ Не удалось сгенерировать задание. Попробуй ещё раз.", cancellationToken: ct);
                     return;
                 }
-                // Сохраняем всё задание для кнопок подсказки и ответа
+                if (!string.IsNullOrWhiteSpace(ch.Value.Topic))
+                    msgState.UsedChallengeTopics.Add(ch.Value.Topic);
                 msgState.CurrentChallenge = $"{ch.Value.BrokenCode}||HINT||{ch.Value.Hint}||FIXED||{ch.Value.FixedCode}||EXPLAIN||{ch.Value.Explanation}";
                 await bot.SendMessage(msgChatId, FormatChallenge(ch.Value.Description, ch.Value.BrokenCode),
                     parseMode: ParseMode.Markdown,
@@ -1060,13 +1084,16 @@ if (!string.IsNullOrWhiteSpace(botToken))
                                 break;
                             case "/challenge":
                                 msgState.Mode = UserMode.Challenge;
+                                msgState.UsedChallengeTopics.Clear();
                                 await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
                                 await bot.SendMessage(msgChatId,
                                     "🔧 *Режим заданий!*\n\nНайди и исправь ошибку в коде.",
                                     parseMode: ParseMode.Markdown, cancellationToken: ct);
-                                var ch = await GenerateChallengeAsync();
+                                var ch = await GenerateChallengeAsync(msgState.UsedChallengeTopics);
                                 if (ch != null)
                                 {
+                                    if (!string.IsNullOrWhiteSpace(ch.Value.Topic))
+                                        msgState.UsedChallengeTopics.Add(ch.Value.Topic);
                                     msgState.CurrentChallenge = $"{ch.Value.BrokenCode}||HINT||{ch.Value.Hint}||FIXED||{ch.Value.FixedCode}||EXPLAIN||{ch.Value.Explanation}";
                                     await bot.SendMessage(msgChatId, FormatChallenge(ch.Value.Description, ch.Value.BrokenCode),
                                         parseMode: ParseMode.Markdown, replyMarkup: GetChallengeKeyboard(), cancellationToken: ct);
@@ -1281,6 +1308,8 @@ class UserState
     public List<string> UsedQuizTopics { get; } = new();
     // Challenge — текущее задание
     public string CurrentChallenge { get; set; } = "";
+    // Темы уже использованных заданий (для исключения повторений)
+    public List<string> UsedChallengeTopics { get; } = new();
     // Interview — история диалога собеседования
     public List<ChatMessage> InterviewHistory { get; } = new();
     public int InterviewQuestionCount { get; set; } = 0;
