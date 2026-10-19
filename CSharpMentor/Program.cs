@@ -1454,102 +1454,89 @@ if (!string.IsNullOrWhiteSpace(botToken))
                 };
                 if (menuAction != null)
                 {
-                    // Эмулируем команду — переназначаем text и продолжаем обработку
-                    // через повторный вызов соответствующего блока
-                    await bot.SendMessage(msgChatId, $"Запускаю {text}...",
-                        cancellationToken: ct);
-                    // Отправляем боту команду от имени пользователя
-                    _ = Task.Run(async () =>
+                    // Вызываем логику напрямую — без Task.Run и лишних сообщений
+                    switch (menuAction)
                     {
-                        // Небольшая задержка чтобы сообщение дошло
-                        await Task.Delay(100);
-                        // Вызываем нужную логику напрямую через команды
-                        switch (menuAction)
-                        {
-                            case "/quiz":
-                                msgState.Mode = UserMode.Quiz;
-                                msgState.QuizCorrect = 0; msgState.QuizTotal = 0;
-                                msgState.CurrentQuiz = null; msgState.UsedQuizTopics.Clear();
-                                await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
-                                await bot.SendMessage(msgChatId,
-                                    "🎯 *Режим квиза!*\n\nОтвечай нажимая кнопки A / B / C / D.",
-                                    parseMode: ParseMode.Markdown, cancellationToken: ct);
-                                var q = await GenerateQuizQuestionAsync(msgState.UsedQuizTopics);
-                                if (q != null)
-                                {
-                                    msgState.CurrentQuiz = q; msgState.QuizTotal++;
-                                    if (!string.IsNullOrWhiteSpace(q.Topic)) msgState.UsedQuizTopics.Add(q.Topic);
-                                    await bot.SendMessage(msgChatId, FormatQuizQuestion(q),
-                                        parseMode: ParseMode.Markdown, replyMarkup: GetQuizAnswerKeyboard(), cancellationToken: ct);
-                                }
-                                break;
-                            case "/challenge":
-                                msgState.Mode = UserMode.Challenge;
-                                msgState.UsedChallengeTopics.Clear();
-                                await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
-                                await bot.SendMessage(msgChatId,
-                                    "🔧 *Режим заданий!*\n\nНайди и исправь ошибку в коде.",
-                                    parseMode: ParseMode.Markdown, cancellationToken: ct);
-                                var ch = await GenerateChallengeAsync(msgState.UsedChallengeTopics);
-                                if (ch != null)
-                                {
-                                    if (!string.IsNullOrWhiteSpace(ch.Value.Topic))
-                                        msgState.UsedChallengeTopics.Add(ch.Value.Topic);
-                                    msgState.CurrentChallenge = $"{ch.Value.BrokenCode}||HINT||{ch.Value.Hint}||FIXED||{ch.Value.FixedCode}||EXPLAIN||{ch.Value.Explanation}";
-                                    await bot.SendMessage(msgChatId, FormatChallenge(ch.Value.Description, ch.Value.BrokenCode),
-                                        parseMode: ParseMode.Markdown, replyMarkup: GetChallengeKeyboard(), cancellationToken: ct);
-                                }
-                                break;
-                            case "/interview":
-                                msgState.Mode = UserMode.Interview;
-                                msgState.InterviewHistory.Clear(); msgState.InterviewQuestionCount = 0;
-                                await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
-                                await bot.SendMessage(msgChatId,
-                                    "🎤 *Симуляция собеседования*\n\nОтвечай на вопросы — после 5 вопросов подведу итог.",
-                                    parseMode: ParseMode.Markdown, cancellationToken: ct);
-                                var firstQ = await ConductInterviewAsync(msgState, "Начни интервью. Поприветствуй и задай первый вопрос.");
-                                msgState.InterviewHistory.Add(new ChatMessage("model", firstQ));
-                                await SendAnswerAsync(bot, msgChatId, firstQ, ct, GetInterviewKeyboard());
-                                break;
-                            case "/roadmap":
-                                await bot.SendMessage(msgChatId, RoadmapText,
-                                    parseMode: ParseMode.Markdown, cancellationToken: ct);
-                                break;
-                            case "/learn":
-                                msgState.Mode = UserMode.Learn;
-                                msgState.CurrentLearnStage = "";
-                                await bot.SendMessage(msgChatId,
-                                    "\U0001F4DA *Режим обучения*\n\nВыбери этап:",
-                                    parseMode: ParseMode.Markdown,
-                                    replyMarkup: GetLearnStagesKeyboard(),
-                                    cancellationToken: ct);
-                                break;
-                            case "/top":
-                                await bot.SendMessage(msgChatId, GetLeaderboard(),
-                                    parseMode: ParseMode.MarkdownV2, cancellationToken: ct);
-                                break;
-                            case "/profile":
-                                await bot.SendMessage(msgChatId,
-                                    GetProfile(msgUserId, msgState),
-                                    parseMode: ParseMode.MarkdownV2, cancellationToken: ct);
-                                break;
-                            case "/help":
-                                await bot.SendMessage(msgChatId,
-                                    "*Команды:*\n\n" +
-                                    "/quiz — проверка знаний \U0001F3AF\n" +
-                                    "/challenge — исправь код \U0001F527\n" +
-                                    "/interview — собеседование \U0001F3A4\n" +
-                                    "/learn — изучение тем \U0001F4DA\n" +
-                                    "/top — таблица лидеров \U0001F3C6\n" +
-                                    "/profile — мой профиль \U0001F4CA\n" +
-                                    "/roadmap — план изучения \U0001F5FA\n" +
-                                    "/clear — очистить историю\n" +
-                                    "/start — главное меню\n\n" +
-                                    "Или просто напиши вопрос по C# \U0001F4AC",
-                                    parseMode: ParseMode.Markdown, cancellationToken: ct);
-                                break;
-                        }
-                    }, ct);
+                        case "/quiz":
+                            msgState.Mode = UserMode.Quiz;
+                            msgState.QuizCorrect = 0; msgState.QuizTotal = 0;
+                            msgState.CurrentQuiz = null; msgState.UsedQuizTopics.Clear();
+                            await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
+                            await bot.SendMessage(msgChatId,
+                                "\U0001F3AF *Режим квиза!*\n\nОтвечай нажимая кнопки A / B / C / D.",
+                                parseMode: ParseMode.Markdown, cancellationToken: ct);
+                            var qm = await GenerateQuizQuestionAsync(msgState.UsedQuizTopics);
+                            if (qm != null)
+                            {
+                                msgState.CurrentQuiz = qm; msgState.QuizTotal++;
+                                if (!string.IsNullOrWhiteSpace(qm.Topic)) msgState.UsedQuizTopics.Add(qm.Topic);
+                                await bot.SendMessage(msgChatId, FormatQuizQuestion(qm),
+                                    parseMode: ParseMode.Markdown, replyMarkup: GetQuizAnswerKeyboard(), cancellationToken: ct);
+                            }
+                            break;
+                        case "/challenge":
+                            msgState.Mode = UserMode.Challenge;
+                            msgState.UsedChallengeTopics.Clear();
+                            await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
+                            var chm = await GenerateChallengeAsync(msgState.UsedChallengeTopics);
+                            if (chm != null)
+                            {
+                                if (!string.IsNullOrWhiteSpace(chm.Value.Topic))
+                                    msgState.UsedChallengeTopics.Add(chm.Value.Topic);
+                                msgState.CurrentChallenge = $"{chm.Value.BrokenCode}||HINT||{chm.Value.Hint}||FIXED||{chm.Value.FixedCode}||EXPLAIN||{chm.Value.Explanation}";
+                                await bot.SendMessage(msgChatId, FormatChallenge(chm.Value.Description, chm.Value.BrokenCode),
+                                    parseMode: ParseMode.Markdown, replyMarkup: GetChallengeKeyboard(), cancellationToken: ct);
+                            }
+                            break;
+                        case "/interview":
+                            msgState.Mode = UserMode.Interview;
+                            msgState.InterviewHistory.Clear(); msgState.InterviewQuestionCount = 0;
+                            await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
+                            await bot.SendMessage(msgChatId,
+                                "\U0001F3A4 *Симуляция собеседования*\n\nОтвечай на вопросы — после 5 вопросов подведу итог.",
+                                parseMode: ParseMode.Markdown, cancellationToken: ct);
+                            var fq = await ConductInterviewAsync(msgState, "Начни интервью. Поприветствуй и задай первый вопрос.");
+                            msgState.InterviewHistory.Add(new ChatMessage("model", fq));
+                            await SendAnswerAsync(bot, msgChatId, fq, ct, GetInterviewKeyboard());
+                            break;
+                        case "/roadmap":
+                            await bot.SendMessage(msgChatId, RoadmapText,
+                                parseMode: ParseMode.Markdown, cancellationToken: ct);
+                            break;
+                        case "/learn":
+                            msgState.Mode = UserMode.Learn;
+                            msgState.CurrentLearnStage = "";
+                            await bot.SendMessage(msgChatId,
+                                "\U0001F4DA *Режим обучения*\n\nВыбери этап:",
+                                parseMode: ParseMode.Markdown,
+                                replyMarkup: GetLearnStagesKeyboard(),
+                                cancellationToken: ct);
+                            break;
+                        case "/top":
+                            await bot.SendMessage(msgChatId, GetLeaderboard(),
+                                parseMode: ParseMode.MarkdownV2, cancellationToken: ct);
+                            break;
+                        case "/profile":
+                            await bot.SendMessage(msgChatId,
+                                GetProfile(msgUserId, msgState),
+                                parseMode: ParseMode.MarkdownV2, cancellationToken: ct);
+                            break;
+                        case "/help":
+                            await bot.SendMessage(msgChatId,
+                                "*Команды:*\n\n" +
+                                "/quiz — проверка знаний \U0001F3AF\n" +
+                                "/challenge — исправь код \U0001F527\n" +
+                                "/interview — собеседование \U0001F3A4\n" +
+                                "/learn — изучение тем \U0001F4DA\n" +
+                                "/top — таблица лидеров \U0001F3C6\n" +
+                                "/profile — мой профиль \U0001F4CA\n" +
+                                "/roadmap — план изучения \U0001F5FA\n" +
+                                "/clear — очистить историю\n" +
+                                "/start — главное меню\n\n" +
+                                "Или просто напиши вопрос по C# \U0001F4AC",
+                                parseMode: ParseMode.Markdown, cancellationToken: ct);
+                            break;
+                    }
                     return;
                 }
 
