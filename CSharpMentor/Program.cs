@@ -573,7 +573,7 @@ async Task<QuizQuestion?> GetNextQuizQuestion(UserState st)
     var qKey = q2.Question.Length > 80 ? q2.Question[..80] : q2.Question;
     if (!st.UsedQuizQuestions.Contains(qKey))
         st.UsedQuizQuestions.Add(qKey);
-    if (st.UsedQuizQuestions.Count > 30)
+    if (st.UsedQuizQuestions.Count > 100)
         st.UsedQuizQuestions.RemoveAt(0);
 
     st.QuizTotal++;
@@ -1299,8 +1299,8 @@ if (!string.IsNullOrWhiteSpace(botToken))
                 msgState.QuizCorrect  = 0;
                 msgState.QuizTotal    = 0;
                 msgState.CurrentQuiz  = null;
-                msgState.UsedQuizTopics.Clear();
-                msgState.UsedQuizQuestions.Clear();
+                msgState.UsedQuizTopics.Clear(); // темы сбрасываем — для разнообразия тем
+                // UsedQuizQuestions НЕ очищаем — помним все виденные вопросы навсегда
                 await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
                 await bot.SendMessage(msgChatId,
                     "\U0001F3AF *Режим квиза активирован!*\n\nОтвечай нажимая кнопки A / B / C / D.",
@@ -1480,7 +1480,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
                             msgState.QuizCorrect = 0; msgState.QuizTotal = 0;
                             msgState.CurrentQuiz = null;
                             msgState.UsedQuizTopics.Clear();
-                            msgState.UsedQuizQuestions.Clear();
+                            // UsedQuizQuestions НЕ очищаем
                             await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
                             await bot.SendMessage(msgChatId,
                                 "\U0001F3AF *Режим квиза!*\n\nОтвечай нажимая кнопки A / B / C / D.",
