@@ -59,29 +59,24 @@ const string SystemPrompt = """
 """;
 
 const string QuizSystemPrompt = """
-Ты — строгий но справедливый экзаменатор по языку C#.
-Твоя задача — проверять знания студентов через вопросы с вариантами ответов.
+Ты — экзаменатор по языку C#. Генерируй вопросы с вариантами ответов.
 
-Правила генерации вопроса:
-1. Задавай вопрос по одной конкретной теме C# (типы данных, ООП, LINQ, async/await, исключения и т.д.).
-2. Давай РОВНО 4 варианта ответа: A, B, C, D.
-3. Только один вариант правильный.
-4. Вопрос должен быть практическим — про поведение кода, а не определения.
-5. Формат ответа СТРОГО такой (без лишнего текста до и после):
+Правила:
+1. Вопрос по одной теме C# (типы данных, ООП, LINQ, async/await, исключения и т.д.)
+2. РОВНО 4 варианта: A, B, C, D. Только один правильный.
+3. Вопрос практический — про поведение кода.
+4. Отвечай СТРОГО в формате JSON (без markdown, без пояснений вокруг):
 
-❓ *Вопрос*
-
-```csharp
-// код если нужен
-```
-
-A) вариант
-B) вариант
-C) вариант
-D) вариант
-
-||Правильный ответ: X) вариант
-Объяснение: почему именно этот ответ верный||
+{
+  "question": "Текст вопроса",
+  "code": "// C# код если нужен, иначе пустая строка",
+  "a": "Вариант A",
+  "b": "Вариант B",
+  "c": "Вариант C",
+  "d": "Вариант D",
+  "correct": "A",
+  "explanation": "Краткое объяснение почему этот ответ верный"
+}
 """;
 
 // ─────────────────────────────────────────────────────────────
@@ -293,11 +288,11 @@ async Task<string> AskGeminiWithFileAsync(string question, byte[] fileData, stri
 }
 
 // ─────────────────────────────────────────────────────────────
-// Gemini — квиз: генерация вопроса
+// Gemini — квиз: генерация вопроса → парсинг JSON
 // ─────────────────────────────────────────────────────────────
-async Task<string> GenerateQuizQuestionAsync()
+async Task<QuizQuestion?> GenerateQuizQuestionAsync()
 {
-    if (string.IsNullOrWhiteSpace(apiKey)) return "❌ API-ключ Gemini не настроен.";
+    if (string.IsNullOrWhiteSpace(apiKey)) return null;
 
     var body = new
     {
@@ -306,10 +301,63 @@ async Task<string> GenerateQuizQuestionAsync()
         {
             new { role = "user", parts = new[] { new { text = "Сгенерируй новый вопрос по C# для студента уровня Junior." } } }
         },
-        generationConfig = new { temperature = 1.0, maxOutputTokens = 1024 }
+        generationConfig = new { temperature = 1.0, maxOutputTokens = 1024, responseMimeType = "application/json" }
     };
-    return await CallGeminiAsync(body);
+
+    var raw = await CallGeminiAsync(body);
+
+    try
+    {
+        // Убираем возможные ```json ``` обёртки
+        var json = raw.Trim();
+        if (json.StartsWith("```")) json = json.Split('\n', 2)[1];
+        if (json.EndsWith("```")) json = json[..json.LastIndexOf("```")];
+
+        var q = JsonSerializer.Deserialize<QuizQuestion>(json.Trim(),
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        return q;
+    }
+    catch (Exception ex)
+    {
+        logger.LogError("Ошибка парсинга квиза: {Msg}\nRaw: {Raw}", ex.Message, raw);
+        return null;
+    }
 }
+
+// Формирует красивый текст вопроса для отправки
+string FormatQuizQuestion(QuizQuestion q)
+{
+    var sb = new StringBuilder();
+    sb.AppendLine("❓ *Вопрос:*");
+    sb.AppendLine(q.Question);
+    if (!string.IsNullOrWhiteSpace(q.Code))
+    {
+        sb.AppendLine();
+        sb.AppendLine("```csharp");
+        sb.AppendLine(q.Code);
+        sb.AppendLine("```");
+    }
+    sb.AppendLine();
+    sb.AppendLine($"A) {q.A}");
+    sb.AppendLine($"B) {q.B}");
+    sb.AppendLine($"C) {q.C}");
+    sb.AppendLine($"D) {q.D}");
+    sb.AppendLine();
+    sb.Append("👇 Выбери ответ:");
+    return sb.ToString();
+}
+
+// Кнопки A/B/C/D для квиза
+InlineKeyboardMarkup GetQuizAnswerKeyboard() => new(new[]
+{
+    new[]
+    {
+        InlineKeyboardButton.WithCallbackData("A", "quiz_answer_A"),
+        InlineKeyboardButton.WithCallbackData("B", "quiz_answer_B"),
+        InlineKeyboardButton.WithCallbackData("C", "quiz_answer_C"),
+        InlineKeyboardButton.WithCallbackData("D", "quiz_answer_D"),
+    }
+});
 
 // ─────────────────────────────────────────────────────────────
 // Roadmap — план изучения C#
@@ -466,15 +514,73 @@ if (!string.IsNullOrWhiteSpace(botToken))
                         state.Mode = UserMode.Quiz;
                         await bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
                         var question = await GenerateQuizQuestionAsync();
-                        await SendAnswerAsync(bot, chatId, question, ct, GetQuizKeyboard());
+                        if (question is null)
+                        {
+                            await bot.SendMessage(chatId, "❌ Не удалось сгенерировать вопрос. Попробуй ещё раз.", cancellationToken: ct);
+                            break;
+                        }
+                        state.CurrentQuiz = question;
+                        state.QuizTotal++;
+                        await bot.SendMessage(chatId, FormatQuizQuestion(question),
+                            parseMode: ParseMode.Markdown,
+                            replyMarkup: GetQuizAnswerKeyboard(),
+                            cancellationToken: ct);
                         break;
 
                     case "quiz_exit":
+                        var score = $"📊 Твой результат: *{state.QuizCorrect}* из *{state.QuizTotal}*";
                         state.Mode = UserMode.Normal;
+                        state.CurrentQuiz = null;
+                        state.QuizCorrect = 0;
+                        state.QuizTotal   = 0;
                         await bot.SendMessage(chatId,
-                            "Вышел из режима квиза. Задавай вопросы по C# 💬",
+                            $"Вышел из режима квиза. {score}\n\nЗадавай вопросы по C# 💬",
+                            parseMode: ParseMode.Markdown,
                             cancellationToken: ct);
                         break;
+
+                    case "quiz_answer_A":
+                    case "quiz_answer_B":
+                    case "quiz_answer_C":
+                    case "quiz_answer_D":
+                    {
+                        var chosen = data.Replace("quiz_answer_", ""); // "A", "B", "C" или "D"
+                        var quiz   = state.CurrentQuiz;
+
+                        if (quiz is null)
+                        {
+                            await bot.SendMessage(chatId, "Нет активного вопроса. Напиши /quiz чтобы начать.", cancellationToken: ct);
+                            break;
+                        }
+
+                        var isCorrect = chosen.Equals(quiz.Correct, StringComparison.OrdinalIgnoreCase);
+                        if (isCorrect) state.QuizCorrect++;
+
+                        // Формируем ответ
+                        var chosenText = chosen switch
+                        {
+                            "A" => quiz.A, "B" => quiz.B, "C" => quiz.C, _ => quiz.D
+                        };
+                        var correctText = quiz.Correct switch
+                        {
+                            "A" => quiz.A, "B" => quiz.B, "C" => quiz.C, _ => quiz.D
+                        };
+
+                        var result = isCorrect
+                            ? $"✅ *Правильно!* Ты выбрал {chosen}) {chosenText}\n\n"
+                            : $"❌ *Неверно.* Ты выбрал {chosen}) {chosenText}\n✅ Правильный ответ: *{quiz.Correct})* {correctText}\n\n";
+
+                        result += $"📖 *Объяснение:*\n{quiz.Explanation}\n\n" +
+                                  $"📊 Счёт: *{state.QuizCorrect}/{state.QuizTotal}*";
+
+                        state.CurrentQuiz = null;
+
+                        await bot.SendMessage(chatId, result,
+                            parseMode: ParseMode.Markdown,
+                            replyMarkup: GetQuizKeyboard(),
+                            cancellationToken: ct);
+                        break;
+                    }
                 }
                 return;
             }
@@ -541,13 +647,27 @@ if (!string.IsNullOrWhiteSpace(botToken))
             // /quiz — запуск квиза
             if (message.Text == "/quiz")
             {
-                msgState.Mode = UserMode.Quiz;
+                msgState.Mode         = UserMode.Quiz;
+                msgState.QuizCorrect  = 0;
+                msgState.QuizTotal    = 0;
+                msgState.CurrentQuiz  = null;
                 await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
                 await bot.SendMessage(msgChatId,
-                    "🎯 *Режим квиза активирован!*\n\nОтвечай на вопросы — проверим твои знания C#.",
+                    "🎯 *Режим квиза активирован!*\n\nОтвечай на вопросы нажимая кнопки A / B / C / D.",
                     parseMode: ParseMode.Markdown, cancellationToken: ct);
+
                 var q = await GenerateQuizQuestionAsync();
-                await SendAnswerAsync(bot, msgChatId, q, ct, GetQuizKeyboard());
+                if (q is null)
+                {
+                    await bot.SendMessage(msgChatId, "❌ Не удалось сгенерировать вопрос. Попробуй ещё раз.", cancellationToken: ct);
+                    return;
+                }
+                msgState.CurrentQuiz = q;
+                msgState.QuizTotal++;
+                await bot.SendMessage(msgChatId, FormatQuizQuestion(q),
+                    parseMode: ParseMode.Markdown,
+                    replyMarkup: GetQuizAnswerKeyboard(),
+                    cancellationToken: ct);
                 return;
             }
 
@@ -631,27 +751,23 @@ if (!string.IsNullOrWhiteSpace(botToken))
             {
                 logger.LogInformation("TG [{User}] [{Mode}]: {Text}", username, msgState.Mode, text);
 
-                string answer;
-
+                // В режиме квиза текстовые ответы не принимаем — только кнопки
                 if (msgState.Mode == UserMode.Quiz)
                 {
-                    // В режиме квиза — принимаем ответ студента и оцениваем
-                    var evalPrompt = $"Студент ответил: \"{text}\"\n\nОцени ответ. Если правильно — похвали и объясни почему верно. Если неверно — объясни ошибку и дай правильный ответ с объяснением.";
-                    answer = await AskGeminiWithHistoryAsync(msgState, evalPrompt);
+                    await bot.SendMessage(msgChatId,
+                        "Выбери ответ нажав кнопку *A*, *B*, *C* или *D* 👆",
+                        parseMode: ParseMode.Markdown, cancellationToken: ct);
+                    return;
                 }
-                else
-                {
-                    // Обычный режим — с историей диалога
-                    answer = await AskGeminiWithHistoryAsync(msgState, text);
-                }
+
+                var answer = await AskGeminiWithHistoryAsync(msgState, text);
 
                 msgState.LastUserQuestion = text;
                 msgState.LastBotAnswer    = answer;
                 AddToHistory(msgState, "user",  text);
                 AddToHistory(msgState, "model", answer);
 
-                var keyboard = msgState.Mode == UserMode.Quiz ? GetQuizKeyboard() : GetAnswerKeyboard();
-                await SendAnswerAsync(bot, msgChatId, answer, ct, keyboard);
+                await SendAnswerAsync(bot, msgChatId, answer, ct, GetAnswerKeyboard());
                 return;
             }
 
@@ -723,6 +839,19 @@ enum UserMode { Normal, Quiz }
 
 record ChatMessage(string Role, string Text);
 
+// Вопрос квиза — десериализуется из JSON-ответа Gemini
+class QuizQuestion
+{
+    public string Question    { get; set; } = "";
+    public string Code        { get; set; } = "";
+    public string A           { get; set; } = "";
+    public string B           { get; set; } = "";
+    public string C           { get; set; } = "";
+    public string D           { get; set; } = "";
+    public string Correct     { get; set; } = ""; // "A", "B", "C" или "D"
+    public string Explanation { get; set; } = "";
+}
+
 class UserState
 {
     public UserMode Mode { get; set; } = UserMode.Normal;
@@ -732,4 +861,9 @@ class UserState
     public DateTime LastActivity { get; set; } = DateTime.UtcNow;
     // Для rate limiting — время каждого запроса за последний час
     public List<DateTime> RequestTimestamps { get; } = new();
+    // Текущий вопрос квиза (хранится до ответа пользователя)
+    public QuizQuestion? CurrentQuiz { get; set; } = null;
+    // Счёт в квизе
+    public int QuizCorrect { get; set; } = 0;
+    public int QuizTotal { get; set; } = 0;
 }
