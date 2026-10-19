@@ -256,13 +256,13 @@ InlineKeyboardMarkup GetAnswerKeyboard() => new(new[]
 {
     new[]
     {
-        InlineKeyboardButton.WithCallbackData("� Другой пример", "another_example"),
-        InlineKeyboardButton.WithCallbackData("� Проще", "explain_simpler"),
+        InlineKeyboardButton.WithCallbackData("\U0001F501 Другой пример", "another_example"),
+        InlineKeyboardButton.WithCallbackData("\U0001F4D6 Проще", "explain_simpler"),
     },
     new[]
     {
-        InlineKeyboardButton.WithCallbackData("� Понятно", "feedback_good"),
-        InlineKeyboardButton.WithCallbackData("🎯 Квиз", "start_quiz"),
+        InlineKeyboardButton.WithCallbackData("\U0001F44D Понятно", "feedback_good"),
+        InlineKeyboardButton.WithCallbackData("\U0001F3AF Квиз", "start_quiz"),
     }
 });
 
@@ -270,8 +270,8 @@ InlineKeyboardMarkup GetQuizKeyboard() => new(new[]
 {
     new[]
     {
-        InlineKeyboardButton.WithCallbackData("➡️ Следующий вопрос", "quiz_next"),
-        InlineKeyboardButton.WithCallbackData("🚪 Выйти из квиза", "quiz_exit"),
+        InlineKeyboardButton.WithCallbackData("\u27A1\uFE0F Следующий вопрос", "quiz_next"),
+        InlineKeyboardButton.WithCallbackData("\U0001F6AA Выйти из квиза", "quiz_exit"),
     }
 });
 
@@ -494,13 +494,13 @@ InlineKeyboardMarkup GetChallengeKeyboard() => new(new[]
 {
     new[]
     {
-        InlineKeyboardButton.WithCallbackData("💡 Подсказка", "challenge_hint"),
-        InlineKeyboardButton.WithCallbackData("✅ Показать ответ", "challenge_answer"),
+        InlineKeyboardButton.WithCallbackData("\U0001F4A1 Подсказка", "challenge_hint"),
+        InlineKeyboardButton.WithCallbackData("\u2705 Показать ответ", "challenge_answer"),
     },
     new[]
     {
-        InlineKeyboardButton.WithCallbackData("➡️ Новое задание", "challenge_next"),
-        InlineKeyboardButton.WithCallbackData("🚪 Выйти", "challenge_exit"),
+        InlineKeyboardButton.WithCallbackData("\u27A1\uFE0F Новое задание", "challenge_next"),
+        InlineKeyboardButton.WithCallbackData("\U0001F6AA Выйти", "challenge_exit"),
     }
 });
 
