@@ -26,8 +26,17 @@ var app = builder.Build();
 // Конфигурация
 // ─────────────────────────────────────────────────────────────
 var config      = app.Services.GetRequiredService<IConfiguration>();
-var apiKey      = config["GeminiApiKey"] ?? Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? "";
-var botToken    = config["TelegramBotToken"] ?? Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN") ?? "";
+
+// Railway передаёт переменные окружения напрямую — проверяем оба варианта
+var apiKey   = Environment.GetEnvironmentVariable("GeminiApiKey")
+            ?? Environment.GetEnvironmentVariable("GEMINI_API_KEY")
+            ?? config["GeminiApiKey"]
+            ?? "";
+
+var botToken = Environment.GetEnvironmentVariable("TelegramBotToken")
+            ?? Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN")
+            ?? config["TelegramBotToken"]
+            ?? "";
 var httpFactory = app.Services.GetRequiredService<IHttpClientFactory>();
 var logger      = app.Services.GetRequiredService<ILogger<Program>>();
 
