@@ -212,10 +212,13 @@ const string LearnSystemPrompt = """
 // Потокобезопасный словарь: userId → состояние
 var userStates = new ConcurrentDictionary<long, UserState>();
 
-UserState GetState(long userId)
+UserState GetState(long userId, string? username = null)
 {
     var state = userStates.GetOrAdd(userId, _ => new UserState());
     state.LastActivity = DateTime.UtcNow;
+    // Обновляем имя если передано
+    if (!string.IsNullOrWhiteSpace(username))
+        state.Username = username;
     return state;
 }
 
@@ -226,6 +229,102 @@ void AddToHistory(UserState state, string role, string text)
     if (state.History.Count > 10)
         state.History.RemoveAt(0);
 }
+
+// ─────────────────────────────────────────────────────────────
+// Система рейтинга
+// ─────────────────────────────────────────────────────────────
+
+// Очки за действия
+const int PointsQuizCorrect   = 10;  // правильный ответ в квизе
+const int PointsChallengeSolved = 15; // решённое задание
+const int PointsLessonRead    = 5;   // прочитанный урок
+const int PointsStreakBonus   = 20;  // бонус за ежедневный стрик
+
+void AddPoints(UserState state, int points, string reason = "")
+{
+    state.TotalPoints += points;
+    if (!string.IsNullOrEmpty(reason))
+        logger.LogInformation("Points +{P} ({R}) → total {T} for {U}",
+            points, reason, state.TotalPoints, state.Username);
+}
+
+void UpdateStreak(UserState state)
+{
+    var today = DateTime.UtcNow.Date;
+    if (state.LastStreakDate == today) return; // уже засчитан сегодня
+
+    if (state.LastStreakDate == today.AddDays(-1))
+    {
+        state.CurrentStreak++;
+        // Бонус за каждые 7 дней подряд
+        if (state.CurrentStreak % 7 == 0)
+            AddPoints(state, PointsStreakBonus, "стрик 7 дней");
+    }
+    else
+    {
+        state.CurrentStreak = 1; // сброс стрика
+    }
+    state.LastStreakDate = today;
+}
+
+// Уровень по очкам
+static (string Title, string Emoji) GetLevel(int points) => points switch
+{
+    < 50   => ("Новичок",    "\U0001F331"),
+    < 150  => ("Студент",    "\U0001F4D6"),
+    < 300  => ("Практикант", "\U0001F527"),
+    < 500  => ("Junior",     "\U0001F4BB"),
+    < 1000 => ("Middle",     "\u2B50"),
+    _      => ("Senior",     "\U0001F3C6")
+};
+
+// Топ-10 пользователей
+string GetLeaderboard()
+{
+    var top = userStates
+        .Where(kv => kv.Value.TotalPoints > 0 && !string.IsNullOrWhiteSpace(kv.Value.Username))
+        .OrderByDescending(kv => kv.Value.TotalPoints)
+        .Take(10)
+        .ToList();
+
+    if (top.Count == 0)
+        return "\U0001F3C6 *Таблица лидеров пуста*\n\nБудь первым — пройди квиз или урок!";
+
+    var sb = new StringBuilder();
+    sb.AppendLine("\U0001F3C6 *Таблица лидеров*\n");
+
+    var medals = new[] { "\U0001F947", "\U0001F948", "\U0001F949" };
+    for (int i = 0; i < top.Count; i++)
+    {
+        var (uid, s) = (top[i].Key, top[i].Value);
+        var prefix = i < 3 ? medals[i] : $"{i + 1}\\.";
+        var (title, emoji) = GetLevel(s.TotalPoints);
+        sb.AppendLine($"{prefix} *{EscapeMd(s.Username)}* {emoji}");
+        sb.AppendLine($"    {s.TotalPoints} очков \\| {title}");
+    }
+    return sb.ToString();
+}
+
+// Профиль пользователя
+string GetProfile(long userId, UserState state)
+{
+    var (title, emoji) = GetLevel(state.TotalPoints);
+    var streakText = state.CurrentStreak > 1 ? $"\U0001F525 Стрик: {state.CurrentStreak} дн\\." : "";
+    return $"{emoji} *{EscapeMd(state.Username)}*\n\n" +
+           $"Уровень: *{title}*\n" +
+           $"\u2B50 Очков: *{state.TotalPoints}*\n\n" +
+           $"\U0001F3AF Правильных в квизе: {state.QuizWins}\n" +
+           $"\U0001F527 Заданий решено: {state.ChallengesSolved}\n" +
+           $"\U0001F4DA Уроков прочитано: {state.LessonsRead}\n" +
+           (streakText.Length > 0 ? $"\n{streakText}" : "");
+}
+
+// Экранирование для MarkdownV2
+string EscapeMd(string text) => text
+    .Replace(".", "\\.").Replace("-", "\\-").Replace("(", "\\(")
+    .Replace(")", "\\)").Replace("!", "\\!").Replace("+", "\\+")
+    .Replace("=", "\\=").Replace("|", "\\|").Replace("{", "\\{")
+    .Replace("}", "\\}").Replace("#", "\\#");
 
 // ─────────────────────────────────────────────────────────────
 // Rate Limiting — не более 25 запросов в час на пользователя
@@ -786,7 +885,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
             {
                 var userId   = query.From.Id;
                 var chatId   = query.Message!.Chat.Id;
-                var state    = GetState(userId);
+                var state    = GetState(userId, query.From.FirstName ?? query.From.Username);
                 var data     = query.Data ?? "";
 
                 await bot.AnswerCallbackQuery(query.Id, cancellationToken: ct);
@@ -1019,6 +1118,10 @@ if (!string.IsNullOrWhiteSpace(botToken))
 
                             // Запоминаем тему для кнопки "Задание по теме"
                             state.CurrentLearnTopic = topic;
+                            // Очки за урок
+                            state.LessonsRead++;
+                            AddPoints(state, PointsLessonRead, $"урок: {topic}");
+                            UpdateStreak(state);
 
                             // Переключаем в Normal — вопросы после урока идут в обычный чат
                             state.Mode = UserMode.Normal;
@@ -1048,7 +1151,13 @@ if (!string.IsNullOrWhiteSpace(botToken))
                         }
 
                         var isCorrect = chosen.Equals(quiz.Correct, StringComparison.OrdinalIgnoreCase);
-                        if (isCorrect) state.QuizCorrect++;
+                        if (isCorrect)
+                        {
+                            state.QuizCorrect++;
+                            state.QuizWins++;
+                            AddPoints(state, PointsQuizCorrect, "квиз");
+                            UpdateStreak(state);
+                        }
 
                         // Формируем ответ
                         var chosenText = chosen switch
@@ -1084,8 +1193,8 @@ if (!string.IsNullOrWhiteSpace(botToken))
 
             var msgChatId  = message.Chat.Id;
             var msgUserId  = message.From?.Id ?? 0;
-            var msgState   = GetState(msgUserId);
             var username   = message.From?.FirstName ?? "Студент";
+            var msgState   = GetState(msgUserId, username);
             var caption    = message.Caption ?? "";
 
             // /start
@@ -1099,7 +1208,8 @@ if (!string.IsNullOrWhiteSpace(botToken))
                 {
                     new[] { new KeyboardButton("\U0001F3AF Квиз"),          new KeyboardButton("\U0001F527 Задание") },
                     new[] { new KeyboardButton("\U0001F3A4 Собеседование"),  new KeyboardButton("\U0001F4DA Учиться") },
-                    new[] { new KeyboardButton("\U0001F5FA Роадмап"),        new KeyboardButton("\u2753 Помощь") },
+                    new[] { new KeyboardButton("\U0001F3C6 Рейтинг"),        new KeyboardButton("\U0001F5FA Роадмап") },
+                    new[] { new KeyboardButton("\u2753 Помощь") },
                 })
                 { ResizeKeyboard = true, OneTimeKeyboard = false };
 
@@ -1140,8 +1250,25 @@ if (!string.IsNullOrWhiteSpace(botToken))
                 msgState.History.Clear();
                 msgState.Mode = UserMode.Normal;
                 await bot.SendMessage(msgChatId,
-                    "🗑 История очищена. Начинаем с чистого листа!",
+                    "\U0001F5D1 История очищена. Начинаем с чистого листа!",
                     cancellationToken: ct);
+                return;
+            }
+
+            // /profile — профиль пользователя
+            if (message.Text == "/profile")
+            {
+                var profileText = GetProfile(msgUserId, msgState);
+                await bot.SendMessage(msgChatId, profileText,
+                    parseMode: ParseMode.MarkdownV2, cancellationToken: ct);
+                return;
+            }
+
+            // /top — таблица лидеров
+            if (message.Text == "/top")
+            {
+                await bot.SendMessage(msgChatId, GetLeaderboard(),
+                    parseMode: ParseMode.MarkdownV2, cancellationToken: ct);
                 return;
             }
 
@@ -1320,6 +1447,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
                     "\U0001F527 Задание"        => "/challenge",
                     "\U0001F3A4 Собеседование"  => "/interview",
                     "\U0001F4DA Учиться"        => "/learn",
+                    "\U0001F3C6 Рейтинг"        => "/top",
                     "\U0001F5FA Роадмап"        => "/roadmap",
                     "\u2753 Помощь"             => "/help",
                     _                           => null
@@ -1396,6 +1524,15 @@ if (!string.IsNullOrWhiteSpace(botToken))
                                     replyMarkup: GetLearnStagesKeyboard(),
                                     cancellationToken: ct);
                                 break;
+                            case "/top":
+                                await bot.SendMessage(msgChatId, GetLeaderboard(),
+                                    parseMode: ParseMode.MarkdownV2, cancellationToken: ct);
+                                break;
+                            case "/profile":
+                                await bot.SendMessage(msgChatId,
+                                    GetProfile(msgUserId, msgState),
+                                    parseMode: ParseMode.MarkdownV2, cancellationToken: ct);
+                                break;
                             case "/help":
                                 await bot.SendMessage(msgChatId,
                                     "*Команды:*\n\n" +
@@ -1403,6 +1540,8 @@ if (!string.IsNullOrWhiteSpace(botToken))
                                     "/challenge — исправь код \U0001F527\n" +
                                     "/interview — собеседование \U0001F3A4\n" +
                                     "/learn — изучение тем \U0001F4DA\n" +
+                                    "/top — таблица лидеров \U0001F3C6\n" +
+                                    "/profile — мой профиль \U0001F4CA\n" +
                                     "/roadmap — план изучения \U0001F5FA\n" +
                                     "/clear — очистить историю\n" +
                                     "/start — главное меню\n\n" +
@@ -1441,6 +1580,17 @@ if (!string.IsNullOrWhiteSpace(botToken))
                                       $"Если да — похвали. Если нет или частично — объясни что не так. Будь конкретным.";
 
                     var checkResult = await AskGeminiWithHistoryAsync(msgState, checkPrompt);
+
+                    // Начисляем очки если ответ выглядит правильным
+                    // (Gemini скажет "правильно" или "верно" в начале)
+                    var lower = checkResult.ToLower();
+                    if (lower.Contains("правильно") || lower.Contains("верно") || lower.Contains("молодец") || lower.Contains("отлично"))
+                    {
+                        msgState.ChallengesSolved++;
+                        AddPoints(msgState, PointsChallengeSolved, "challenge решён");
+                        UpdateStreak(msgState);
+                    }
+
                     await SendAnswerAsync(bot, msgChatId, checkResult, ct, GetChallengeKeyboard());
                     return;
                 }
@@ -1511,6 +1661,8 @@ if (!string.IsNullOrWhiteSpace(botToken))
             new BotCommand { Command = "quiz",      Description = "\U0001F3AF Проверить знания" },
             new BotCommand { Command = "challenge", Description = "\U0001F527 Задание: исправь код" },
             new BotCommand { Command = "interview", Description = "\U0001F3A4 Симуляция собеседования" },
+            new BotCommand { Command = "top",       Description = "\U0001F3C6 Таблица лидеров" },
+            new BotCommand { Command = "profile",   Description = "\U0001F4CA Мой профиль и очки" },
             new BotCommand { Command = "roadmap",   Description = "\U0001F5FA План изучения C#" },
             new BotCommand { Command = "clear",     Description = "\U0001F5D1 Очистить историю диалога" },
             new BotCommand { Command = "help",      Description = "\u2753 Справка" },
@@ -1606,4 +1758,20 @@ class UserState
     public string CurrentLearnStage { get; set; } = "";
     // Текущая тема урока (для задания по теме)
     public string CurrentLearnTopic { get; set; } = "";
+    // ── Рейтинг ──────────────────────────────────────────────
+    public string Username    { get; set; } = "";   // имя для таблицы лидеров
+    public int TotalPoints    { get; set; } = 0;    // общий рейтинг
+    public int QuizWins       { get; set; } = 0;    // всего правильных в квизе
+    public int ChallengesSolved { get; set; } = 0;  // решённых заданий
+    public int LessonsRead    { get; set; } = 0;    // прочитанных уроков
+    public int CurrentStreak  { get; set; } = 0;    // дней подряд
+    public DateTime LastStreakDate { get; set; } = DateTime.MinValue;
+}
+
+// Профиль пользователя для таблицы лидеров
+class UserProfile
+{
+    public long   UserId   { get; set; }
+    public string Username { get; set; } = "";
+    public int    Points   { get; set; }
 }
