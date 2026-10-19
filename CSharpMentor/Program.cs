@@ -176,13 +176,13 @@ InlineKeyboardMarkup GetAnswerKeyboard() => new(new[]
 {
     new[]
     {
-        InlineKeyboardButton.WithCallbackData("👍 Понятно", "feedback_good"),
-        InlineKeyboardButton.WithCallbackData("🔁 Другой пример", "another_example"),
+        InlineKeyboardButton.WithCallbackData("� Другой пример", "another_example"),
+        InlineKeyboardButton.WithCallbackData("� Проще", "explain_simpler"),
     },
     new[]
     {
-        InlineKeyboardButton.WithCallbackData("📖 Объясни проще", "explain_simpler"),
-        InlineKeyboardButton.WithCallbackData("🎯 Ещё вопрос (quiz)", "start_quiz"),
+        InlineKeyboardButton.WithCallbackData("� Понятно", "feedback_good"),
+        InlineKeyboardButton.WithCallbackData("🎯 Квиз", "start_quiz"),
     }
 });
 
@@ -813,19 +813,23 @@ if (!string.IsNullOrWhiteSpace(botToken))
             {
                 msgState.History.Clear();
                 msgState.Mode = UserMode.Normal;
+
+                // Главное меню — кнопки-плитки внизу экрана
+                var mainMenu = new ReplyKeyboardMarkup(new[]
+                {
+                    new[] { new KeyboardButton("🎯 Квиз"),          new KeyboardButton("� Задание") },
+                    new[] { new KeyboardButton("🎤 Собеседование"),  new KeyboardButton("🗺 Роадмап") },
+                    new[] { new KeyboardButton("❓ Помощь") },
+                })
+                { ResizeKeyboard = true, OneTimeKeyboard = false };
+
                 await bot.SendMessage(msgChatId,
-                    $"👋 Привет, *{username}*!\n\n" +
-                    "Я — *C# Mentor*, твой ИИ-помощник по C#.\n\n" +
-                    "Что умею:\n" +
-                    "💬 Отвечать на вопросы по C# и .NET\n" +
-                    "🧠 Помню контекст нашего диалога\n" +
-                    "📷 Разбирать скриншоты с кодом и ошибками\n" +
-                    "📄 Анализировать .cs файлы\n" +
-                    "🗺 Показать план изучения C# (/roadmap)\n" +
-                    "🎯 Проверять знания через квиз (/quiz)\n" +
-                    "🔧 Задания на исправление кода (/challenge)\n" +
-                    "🎤 Симуляция собеседования (/interview)\n\n" +
-                    "Просто напиши вопрос! 🚀",                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                    $"� Привет, *{username}*!\n\n" +
+                    "Я — *C# Mentor*, твой ИИ-помощник по языку C#.\n\n" +
+                    "Выбери режим кнопкой или просто задай вопрос:",
+                    parseMode: ParseMode.Markdown,
+                    replyMarkup: mainMenu,
+                    cancellationToken: ct);
                 return;
             }
 
@@ -1013,6 +1017,93 @@ if (!string.IsNullOrWhiteSpace(botToken))
             {
                 logger.LogInformation("TG [{User}] [{Mode}]: {Text}", username, msgState.Mode, text);
 
+                // ── Обработка кнопок главного меню ───────────
+                var menuAction = text switch
+                {
+                    "🎯 Квиз"          => "/quiz",
+                    "🔧 Задание"       => "/challenge",
+                    "🎤 Собеседование" => "/interview",
+                    "🗺 Роадмап"       => "/roadmap",
+                    "❓ Помощь"        => "/help",
+                    _                  => null
+                };
+                if (menuAction != null)
+                {
+                    // Эмулируем команду — переназначаем text и продолжаем обработку
+                    // через повторный вызов соответствующего блока
+                    await bot.SendMessage(msgChatId, $"Запускаю {text}...",
+                        cancellationToken: ct);
+                    // Отправляем боту команду от имени пользователя
+                    _ = Task.Run(async () =>
+                    {
+                        // Небольшая задержка чтобы сообщение дошло
+                        await Task.Delay(100);
+                        // Вызываем нужную логику напрямую через команды
+                        switch (menuAction)
+                        {
+                            case "/quiz":
+                                msgState.Mode = UserMode.Quiz;
+                                msgState.QuizCorrect = 0; msgState.QuizTotal = 0;
+                                msgState.CurrentQuiz = null; msgState.UsedQuizTopics.Clear();
+                                await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
+                                await bot.SendMessage(msgChatId,
+                                    "🎯 *Режим квиза!*\n\nОтвечай нажимая кнопки A / B / C / D.",
+                                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                                var q = await GenerateQuizQuestionAsync(msgState.UsedQuizTopics);
+                                if (q != null)
+                                {
+                                    msgState.CurrentQuiz = q; msgState.QuizTotal++;
+                                    if (!string.IsNullOrWhiteSpace(q.Topic)) msgState.UsedQuizTopics.Add(q.Topic);
+                                    await bot.SendMessage(msgChatId, FormatQuizQuestion(q),
+                                        parseMode: ParseMode.Markdown, replyMarkup: GetQuizAnswerKeyboard(), cancellationToken: ct);
+                                }
+                                break;
+                            case "/challenge":
+                                msgState.Mode = UserMode.Challenge;
+                                await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
+                                await bot.SendMessage(msgChatId,
+                                    "🔧 *Режим заданий!*\n\nНайди и исправь ошибку в коде.",
+                                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                                var ch = await GenerateChallengeAsync();
+                                if (ch != null)
+                                {
+                                    msgState.CurrentChallenge = $"{ch.Value.BrokenCode}||HINT||{ch.Value.Hint}||FIXED||{ch.Value.FixedCode}||EXPLAIN||{ch.Value.Explanation}";
+                                    await bot.SendMessage(msgChatId, FormatChallenge(ch.Value.Description, ch.Value.BrokenCode),
+                                        parseMode: ParseMode.Markdown, replyMarkup: GetChallengeKeyboard(), cancellationToken: ct);
+                                }
+                                break;
+                            case "/interview":
+                                msgState.Mode = UserMode.Interview;
+                                msgState.InterviewHistory.Clear(); msgState.InterviewQuestionCount = 0;
+                                await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
+                                await bot.SendMessage(msgChatId,
+                                    "🎤 *Симуляция собеседования*\n\nОтвечай на вопросы — после 5 вопросов подведу итог.",
+                                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                                var firstQ = await ConductInterviewAsync(msgState, "Начни интервью. Поприветствуй и задай первый вопрос.");
+                                msgState.InterviewHistory.Add(new ChatMessage("model", firstQ));
+                                await SendAnswerAsync(bot, msgChatId, firstQ, ct, GetInterviewKeyboard());
+                                break;
+                            case "/roadmap":
+                                await bot.SendMessage(msgChatId, RoadmapText,
+                                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                                break;
+                            case "/help":
+                                await bot.SendMessage(msgChatId,
+                                    "*Команды:*\n\n" +
+                                    "/quiz — проверка знаний 🎯\n" +
+                                    "/challenge — исправь код 🔧\n" +
+                                    "/interview — собеседование 🎤\n" +
+                                    "/roadmap — план изучения 🗺\n" +
+                                    "/clear — очистить историю\n" +
+                                    "/start — главное меню\n\n" +
+                                    "Или просто напиши вопрос по C# 💬",
+                                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                                break;
+                        }
+                    }, ct);
+                    return;
+                }
+
                 // В режиме квиза — только кнопки
                 if (msgState.Mode == UserMode.Quiz)
                 {
@@ -1096,6 +1187,19 @@ if (!string.IsNullOrWhiteSpace(botToken))
     {
         var me = await botClient.GetMe();
         logger.LogInformation("✅ Telegram бот запущен: @{Username}", me.Username);
+
+        // ── Регистрируем команды — появятся в меню "/" у пользователя
+        await botClient.SetMyCommands(new[]
+        {
+            new BotCommand { Command = "start",     Description = "🏠 Главное меню" },
+            new BotCommand { Command = "quiz",      Description = "🎯 Проверить знания" },
+            new BotCommand { Command = "challenge", Description = "🔧 Задание: исправь код" },
+            new BotCommand { Command = "interview", Description = "🎤 Симуляция собеседования" },
+            new BotCommand { Command = "roadmap",   Description = "🗺 План изучения C#" },
+            new BotCommand { Command = "clear",     Description = "🗑 Очистить историю диалога" },
+            new BotCommand { Command = "help",      Description = "❓ Справка" },
+        });
+        logger.LogInformation("✅ Команды зарегистрированы");
     }
     catch (Exception ex)
     {
