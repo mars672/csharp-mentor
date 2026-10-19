@@ -268,6 +268,49 @@ var userStates = new ConcurrentDictionary<long, UserState>();
 var duelRooms  = new ConcurrentDictionary<string, DuelRoom>();
 var userDuels  = new ConcurrentDictionary<long, string>(); // userId → duelCode
 
+// ─────────────────────────────────────────────────────────────
+// Фоновый cleaner: удаляем старые дуэли и неактивные UserState
+// ─────────────────────────────────────────────────────────────
+_ = Task.Run(async () =>
+{
+    while (true)
+    {
+        await Task.Delay(TimeSpan.FromMinutes(30));
+        try
+        {
+            // Дуэли завершённые или старше 2 часов
+            var expiredDuelCodes = duelRooms
+                .Where(kv => kv.Value.Status == DuelStatus.Finished
+                    || (DateTime.UtcNow - kv.Value.CreatedAt).TotalHours > 2)
+                .Select(kv => kv.Key)
+                .ToList();
+
+            foreach (var code in expiredDuelCodes)
+            {
+                if (duelRooms.TryRemove(code, out var removed))
+                {
+                    userDuels.TryRemove(removed.Player1Id, out _);
+                    userDuels.TryRemove(removed.Player2Id, out _);
+                }
+            }
+
+            // UserState неактивных > 48 часов
+            var expiredUserIds = userStates
+                .Where(kv => (DateTime.UtcNow - kv.Value.LastActivity).TotalHours > 48)
+                .Select(kv => kv.Key)
+                .ToList();
+
+            foreach (var uid in expiredUserIds)
+                userStates.TryRemove(uid, out _);
+
+            if (expiredDuelCodes.Count > 0 || expiredUserIds.Count > 0)
+                logger.LogInformation("Cleaner: удалено {D} дуэлей, {U} UserState",
+                    expiredDuelCodes.Count, expiredUserIds.Count);
+        }
+        catch (Exception ex) { logger.LogError(ex, "Ошибка в background cleaner"); }
+    }
+});
+
 string GenerateDuelCode()
 {
     const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -331,12 +374,12 @@ async Task SendDuelQuestion(ITelegramBotClient bot, long chatId, DuelRoom room, 
 
 UserState GetState(long userId, string? username = null)
 {
-    var isNew = !userStates.ContainsKey(userId);
-    var state = userStates.GetOrAdd(userId, _ => new UserState());
+    // GetOrAdd атомарен — используем результат для определения новизны
+    var isNew = false;
+    var state = userStates.GetOrAdd(userId, _ => { isNew = true; return new UserState(); });
     state.LastActivity = DateTime.UtcNow;
     if (!string.IsNullOrWhiteSpace(username))
         state.Username = username;
-    // Загружаем из БД только один раз при первом обращении
     if (isNew)
         userDb.LoadUser(userId, state);
     return state;
@@ -1342,8 +1385,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
                             acceptRoom.Player1Answered = 0;
                             acceptRoom.Player2Answered = 0;
                             await SendDuelQuestion(bot, acceptRoom.Player1Id, acceptRoom, 0, ct);
-                            await SendDuelQuestion(bot, chatId, acceptRoom, 0, ct);
-                            break;
+                            await SendDuelQuestion(bot, chatId, acceptRoom, 0, ct);                            break;
                         }
 
                         // duel_ans_{code}_{qIndex}_{choice} — ответ в дуэли
@@ -1355,6 +1397,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
                                 && duelRooms.TryGetValue(parts[2], out var room)
                                 && room.Status == DuelStatus.InProgress
                                 && int.TryParse(parts[3], out var qIdx)
+                                && qIdx >= 0                        // баг #10: защита от отрицательного индекса
                                 && qIdx < room.Questions.Count)
                             {
                                 var choice   = parts[4];
@@ -1420,9 +1463,13 @@ if (!string.IsNullOrWhiteSpace(botToken))
                                 var p1done = room.Player1Answered >= DuelRoom.TotalQuestions;
                                 var p2done = room.Player2Answered >= DuelRoom.TotalQuestions;
 
-                                if (p1done && p2done && room.Status == DuelStatus.InProgress)
+                                // Атомарно меняем статус чтобы не завершить дважды
+                                if (p1done && p2done &&
+                                    Interlocked.CompareExchange(
+                                        ref room.StatusInt,
+                                        (int)DuelStatus.Finished,
+                                        (int)DuelStatus.InProgress) == (int)DuelStatus.InProgress)
                                 {
-                                    room.Status = DuelStatus.Finished;
                                     var s1 = room.Player1Score;
                                     var s2 = room.Player2Score;
 
@@ -1875,11 +1922,13 @@ if (!string.IsNullOrWhiteSpace(botToken))
                         return;
                     }
 
+                    // Инициализируем счётчики ПЕРЕД отправкой вопросов
+                    room.Player1Answered = 0;
+                    room.Player2Answered = 0;
+
                     // Отправляем первый вопрос обоим
                     await SendDuelQuestion(bot, room.Player1Id, room, 0, ct);
                     await SendDuelQuestion(bot, msgChatId, room, 0, ct);
-                    room.Player1Answered = 0;
-                    room.Player2Answered = 0;
                 }
                 return;
             }
@@ -2265,21 +2314,26 @@ enum DuelStatus { WaitingForOpponent, InProgress, Finished }
 
 class DuelRoom
 {
-    public string   Code       { get; set; } = "";  // 4-значный код приглашения
+    public string   Code       { get; set; } = "";
     public long     Player1Id  { get; set; }
     public string   Player1Name { get; set; } = "";
     public long     Player2Id  { get; set; }
     public string   Player2Name { get; set; } = "";
-    public DuelStatus Status   { get; set; } = DuelStatus.WaitingForOpponent;
 
-    // Одинаковые вопросы для обоих игроков
+    // Атомарный статус через int для Interlocked
+    public int StatusInt = (int)DuelStatus.WaitingForOpponent;
+    public DuelStatus Status
+    {
+        get => (DuelStatus)StatusInt;
+        set => StatusInt = (int)value;
+    }
+
     public List<QuizQuestion> Questions { get; } = new();
     public int CurrentQuestionIndex { get; set; } = 0;
 
-    // Ответы и счёт
-    public int Player1Score   { get; set; } = 0;
-    public int Player2Score   { get; set; } = 0;
-    public int Player1Answered { get; set; } = 0; // сколько вопросов ответил
+    public int Player1Score    { get; set; } = 0;
+    public int Player2Score    { get; set; } = 0;
+    public int Player1Answered { get; set; } = 0;
     public int Player2Answered { get; set; } = 0;
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -2328,7 +2382,7 @@ class UserDb
 
         // Добавляем last_active если колонки ещё нет (миграция старой БД)
         try { Execute(conn, "ALTER TABLE users ADD COLUMN last_active TEXT NOT NULL DEFAULT ''"); }
-        catch { /* уже существует */ }
+        catch (SqliteException) { /* колонка уже существует — норма */ }
     }
 
     private static void Execute(SqliteConnection conn, string sql)
