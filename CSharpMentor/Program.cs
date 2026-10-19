@@ -515,23 +515,27 @@ async Task<string> AskGeminiWithFileAsync(string question, byte[] fileData, stri
 // ─────────────────────────────────────────────────────────────
 // Gemini — квиз: генерация вопроса → парсинг JSON
 // ─────────────────────────────────────────────────────────────
-async Task<QuizQuestion?> GenerateQuizQuestionAsync(List<string> usedTopics)
+async Task<QuizQuestion?> GenerateQuizQuestionAsync(List<string> usedTopics, List<string>? usedQuestions = null)
 {
     if (string.IsNullOrWhiteSpace(apiKey)) return null;
 
-    // Подсказываем Gemini какие темы уже были
     var usedHint = usedTopics.Count > 0
         ? $"Уже использованные темы (НЕ повторяй их): {string.Join(", ", usedTopics)}."
         : "Это первый вопрос в сессии.";
+
+    // Добавляем подсказку об уже виденных вопросах
+    var questionsHint = usedQuestions?.Count > 0
+        ? $"\n\nЭти вопросы уже были заданы (НЕ повторяй их):\n- {string.Join("\n- ", usedQuestions.TakeLast(15))}"
+        : "";
 
     var body = new
     {
         system_instruction = new { parts = new[] { new { text = QuizSystemPrompt } } },
         contents = new[]
         {
-            new { role = "user", parts = new[] { new { text = $"Сгенерируй новый вопрос по C# для начинающего. {usedHint}" } } }
+            new { role = "user", parts = new[] { new { text = $"Сгенерируй новый вопрос по C# для начинающего. {usedHint}{questionsHint}" } } }
         },
-        generationConfig = new { temperature = 1.0, maxOutputTokens = 1024, responseMimeType = "application/json" }
+        generationConfig = new { temperature = 1.2, maxOutputTokens = 1024, responseMimeType = "application/json" }
     };
 
     var raw = await CallGeminiAsync(body);
@@ -551,6 +555,29 @@ async Task<QuizQuestion?> GenerateQuizQuestionAsync(List<string> usedTopics)
         logger.LogError("Ошибка парсинга квиза: {Msg}\nRaw: {Raw}", ex.Message, raw);
         return null;
     }
+}
+
+// Вспомогательная функция: сгенерировать следующий вопрос и сохранить в state
+async Task<QuizQuestion?> GetNextQuizQuestion(UserState st)
+{
+    var q2 = await GenerateQuizQuestionAsync(st.UsedQuizTopics, st.UsedQuizQuestions);
+    if (q2 is null) return null;
+
+    // Запоминаем тему
+    if (!string.IsNullOrWhiteSpace(q2.Topic))
+        st.UsedQuizTopics.Add(q2.Topic);
+    if (st.UsedQuizTopics.Count >= 10)
+        st.UsedQuizTopics.Clear();
+
+    // Запоминаем сам вопрос (первые 80 символов) чтобы Gemini не повторял
+    var qKey = q2.Question.Length > 80 ? q2.Question[..80] : q2.Question;
+    if (!st.UsedQuizQuestions.Contains(qKey))
+        st.UsedQuizQuestions.Add(qKey);
+    if (st.UsedQuizQuestions.Count > 30)
+        st.UsedQuizQuestions.RemoveAt(0);
+
+    st.QuizTotal++;
+    return q2;
 }
 
 // Формирует красивый текст вопроса для отправки
@@ -920,20 +947,13 @@ if (!string.IsNullOrWhiteSpace(botToken))
                     case "quiz_next":
                         state.Mode = UserMode.Quiz;
                         await bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
-                        var question = await GenerateQuizQuestionAsync(state.UsedQuizTopics);
+                        var question = await GetNextQuizQuestion(state);
                         if (question is null)
                         {
                             await bot.SendMessage(chatId, "❌ Не удалось сгенерировать вопрос. Попробуй ещё раз.", cancellationToken: ct);
                             break;
                         }
                         state.CurrentQuiz = question;
-                        state.QuizTotal++;
-                        // Запоминаем тему чтобы не повторять
-                        if (!string.IsNullOrWhiteSpace(question.Topic))
-                            state.UsedQuizTopics.Add(question.Topic);
-                        // После 10 вопросов сбрасываем список тем — начинаем новый круг
-                        if (state.UsedQuizTopics.Count >= 10)
-                            state.UsedQuizTopics.Clear();
                         await bot.SendMessage(chatId, FormatQuizQuestion(question),
                             parseMode: ParseMode.Markdown,
                             replyMarkup: GetQuizAnswerKeyboard(),
@@ -1280,21 +1300,19 @@ if (!string.IsNullOrWhiteSpace(botToken))
                 msgState.QuizTotal    = 0;
                 msgState.CurrentQuiz  = null;
                 msgState.UsedQuizTopics.Clear();
+                msgState.UsedQuizQuestions.Clear();
                 await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
                 await bot.SendMessage(msgChatId,
-                    "🎯 *Режим квиза активирован!*\n\nОтвечай на вопросы нажимая кнопки A / B / C / D.",
+                    "\U0001F3AF *Режим квиза активирован!*\n\nОтвечай нажимая кнопки A / B / C / D.",
                     parseMode: ParseMode.Markdown, cancellationToken: ct);
 
-                var q = await GenerateQuizQuestionAsync(msgState.UsedQuizTopics);
+                var q = await GetNextQuizQuestion(msgState);
                 if (q is null)
                 {
                     await bot.SendMessage(msgChatId, "❌ Не удалось сгенерировать вопрос. Попробуй ещё раз.", cancellationToken: ct);
                     return;
                 }
                 msgState.CurrentQuiz = q;
-                msgState.QuizTotal++;
-                if (!string.IsNullOrWhiteSpace(q.Topic))
-                    msgState.UsedQuizTopics.Add(q.Topic);
                 await bot.SendMessage(msgChatId, FormatQuizQuestion(q),
                     parseMode: ParseMode.Markdown,
                     replyMarkup: GetQuizAnswerKeyboard(),
@@ -1460,16 +1478,17 @@ if (!string.IsNullOrWhiteSpace(botToken))
                         case "/quiz":
                             msgState.Mode = UserMode.Quiz;
                             msgState.QuizCorrect = 0; msgState.QuizTotal = 0;
-                            msgState.CurrentQuiz = null; msgState.UsedQuizTopics.Clear();
+                            msgState.CurrentQuiz = null;
+                            msgState.UsedQuizTopics.Clear();
+                            msgState.UsedQuizQuestions.Clear();
                             await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
                             await bot.SendMessage(msgChatId,
                                 "\U0001F3AF *Режим квиза!*\n\nОтвечай нажимая кнопки A / B / C / D.",
                                 parseMode: ParseMode.Markdown, cancellationToken: ct);
-                            var qm = await GenerateQuizQuestionAsync(msgState.UsedQuizTopics);
+                            var qm = await GetNextQuizQuestion(msgState);
                             if (qm != null)
                             {
-                                msgState.CurrentQuiz = qm; msgState.QuizTotal++;
-                                if (!string.IsNullOrWhiteSpace(qm.Topic)) msgState.UsedQuizTopics.Add(qm.Topic);
+                                msgState.CurrentQuiz = qm;
                                 await bot.SendMessage(msgChatId, FormatQuizQuestion(qm),
                                     parseMode: ParseMode.Markdown, replyMarkup: GetQuizAnswerKeyboard(), cancellationToken: ct);
                             }
@@ -1734,6 +1753,8 @@ class UserState
     public int QuizTotal   { get; set; } = 0;
     // Темы уже заданных вопросов в этой сессии (для исключения повторений)
     public List<string> UsedQuizTopics { get; } = new();
+    // Сами вопросы которые уже были (первые 50 символов для сравнения)
+    public List<string> UsedQuizQuestions { get; } = new();
     // Challenge — текущее задание
     public string CurrentChallenge { get; set; } = "";
     // Темы уже использованных заданий (для исключения повторений)
