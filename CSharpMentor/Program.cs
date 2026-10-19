@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -5,6 +6,7 @@ using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using Telegram.Bot.Types.ReplyMarkups;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -15,8 +17,6 @@ builder.Services.AddHttpClient("gemini", client =>
         new MediaTypeWithQualityHeaderValue("application/json"));
     client.Timeout = TimeSpan.FromSeconds(90);
 });
-
-// HTTP-клиент для скачивания файлов из Telegram (без BaseAddress)
 builder.Services.AddHttpClient("files");
 
 var app = builder.Build();
@@ -28,19 +28,17 @@ var config = app.Services.GetRequiredService<IConfiguration>();
 
 var apiKey = Environment.GetEnvironmentVariable("GeminiApiKey")
           ?? Environment.GetEnvironmentVariable("GEMINI_API_KEY")
-          ?? config["GeminiApiKey"]
-          ?? "";
+          ?? config["GeminiApiKey"] ?? "";
 
 var botToken = Environment.GetEnvironmentVariable("TelegramBotToken")
             ?? Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN")
-            ?? config["TelegramBotToken"]
-            ?? "";
+            ?? config["TelegramBotToken"] ?? "";
 
 var httpFactory = app.Services.GetRequiredService<IHttpClientFactory>();
 var logger      = app.Services.GetRequiredService<ILogger<Program>>();
 
 // ─────────────────────────────────────────────────────────────
-// Системный промпт
+// Системные промпты
 // ─────────────────────────────────────────────────────────────
 const string SystemPrompt = """
 Ты — дружелюбный и опытный ментор по языку программирования C#.
@@ -52,20 +50,90 @@ const string SystemPrompt = """
 3. Объясняй простым и понятным языком, избегай излишнего академизма.
 4. Всегда давай рабочий пример кода на современном C# (C# 12+).
 5. Разбирай каждую строчку кода кратким комментарием.
-6. Используй жизненные аналогии, чтобы объяснить абстрактные концепции.
-7. Структурируй ответ:
-   - Краткое объяснение «что это такое»
-   - Пример кода с комментариями
-   - Разбор примера
-   - (опционально) Жизненная аналогия или совет
-8. При объяснении ошибок: покажи неправильный код → объясни причину → покажи исправленный код.
-9. Если прислали скриншот или фото с кодом/ошибкой — внимательно разбери что на нём изображено.
-10. Если прислали .cs файл — проанализируй код, найди проблемы и предложи улучшения.
-11. Форматируй код в блоках ``` с указанием языка (```csharp).
+6. Используй жизненные аналогии чтобы объяснить абстрактные концепции.
+7. Структурируй ответ: объяснение → код с комментариями → разбор → аналогия/совет.
+8. При объяснении ошибок: неправильный код → причина → исправленный код.
+9. Если прислали скриншот — разбери код или ошибку на нём.
+10. Если прислали .cs файл — проанализируй код, найди проблемы, предложи улучшения.
+11. Форматируй код в блоках ```csharp.
+""";
+
+const string QuizSystemPrompt = """
+Ты — строгий но справедливый экзаменатор по языку C#.
+Твоя задача — проверять знания студентов через вопросы с вариантами ответов.
+
+Правила генерации вопроса:
+1. Задавай вопрос по одной конкретной теме C# (типы данных, ООП, LINQ, async/await, исключения и т.д.).
+2. Давай РОВНО 4 варианта ответа: A, B, C, D.
+3. Только один вариант правильный.
+4. Вопрос должен быть практическим — про поведение кода, а не определения.
+5. Формат ответа СТРОГО такой (без лишнего текста до и после):
+
+❓ *Вопрос*
+
+```csharp
+// код если нужен
+```
+
+A) вариант
+B) вариант
+C) вариант
+D) вариант
+
+||Правильный ответ: X) вариант
+Объяснение: почему именно этот ответ верный||
 """;
 
 // ─────────────────────────────────────────────────────────────
-// Скачать файл из Telegram и вернуть bytes + mimeType
+// Хранение состояния пользователей (в памяти)
+// ─────────────────────────────────────────────────────────────
+
+// Потокобезопасный словарь: userId → состояние
+var userStates = new ConcurrentDictionary<long, UserState>();
+
+UserState GetState(long userId)
+{
+    var state = userStates.GetOrAdd(userId, _ => new UserState());
+    state.LastActivity = DateTime.UtcNow;
+    return state;
+}
+
+void AddToHistory(UserState state, string role, string text)
+{
+    state.History.Add(new ChatMessage(role, text));
+    // Держим не более 10 сообщений (5 пар вопрос-ответ)
+    if (state.History.Count > 10)
+        state.History.RemoveAt(0);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Inline-кнопки после ответа
+// ─────────────────────────────────────────────────────────────
+InlineKeyboardMarkup GetAnswerKeyboard() => new(new[]
+{
+    new[]
+    {
+        InlineKeyboardButton.WithCallbackData("👍 Понятно", "feedback_good"),
+        InlineKeyboardButton.WithCallbackData("🔁 Другой пример", "another_example"),
+    },
+    new[]
+    {
+        InlineKeyboardButton.WithCallbackData("📖 Объясни проще", "explain_simpler"),
+        InlineKeyboardButton.WithCallbackData("🎯 Ещё вопрос (quiz)", "start_quiz"),
+    }
+});
+
+InlineKeyboardMarkup GetQuizKeyboard() => new(new[]
+{
+    new[]
+    {
+        InlineKeyboardButton.WithCallbackData("➡️ Следующий вопрос", "quiz_next"),
+        InlineKeyboardButton.WithCallbackData("🚪 Выйти из квиза", "quiz_exit"),
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// Скачать файл из Telegram
 // ─────────────────────────────────────────────────────────────
 async Task<(byte[] Data, string MimeType)?> DownloadTelegramFileAsync(
     ITelegramBotClient bot, string fileId, string defaultMime)
@@ -75,23 +143,19 @@ async Task<(byte[] Data, string MimeType)?> DownloadTelegramFileAsync(
         var file = await bot.GetFile(fileId);
         if (file.FilePath is null) return null;
 
-        var url = $"https://api.telegram.org/file/bot{botToken}/{file.FilePath}";
+        var url  = $"https://api.telegram.org/file/bot{botToken}/{file.FilePath}";
         var http = httpFactory.CreateClient("files");
         var data = await http.GetByteArrayAsync(url);
 
-        // Определяем MIME по расширению файла
-        var ext = Path.GetExtension(file.FilePath).ToLowerInvariant();
+        var ext  = Path.GetExtension(file.FilePath).ToLowerInvariant();
         var mime = ext switch
         {
             ".jpg" or ".jpeg" => "image/jpeg",
             ".png"            => "image/png",
             ".gif"            => "image/gif",
             ".webp"           => "image/webp",
-            ".cs"             => "text/plain",
-            ".txt"            => "text/plain",
             _                 => defaultMime
         };
-
         return (data, mime);
     }
     catch (Exception ex)
@@ -102,83 +166,12 @@ async Task<(byte[] Data, string MimeType)?> DownloadTelegramFileAsync(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Запрос к Gemini — только текст
-// ─────────────────────────────────────────────────────────────
-async Task<string> AskGeminiAsync(string question)
-{
-    if (string.IsNullOrWhiteSpace(apiKey))
-        return "❌ API-ключ Gemini не настроен на сервере.";
-
-    var body = new
-    {
-        system_instruction = new { parts = new[] { new { text = SystemPrompt } } },
-        contents = new[]
-        {
-            new { role = "user", parts = new[] { new { text = question } } }
-        },
-        generationConfig = new { temperature = 0.7, maxOutputTokens = 8192 }
-    };
-
-    return await CallGeminiAsync(body);
-}
-
-// ─────────────────────────────────────────────────────────────
-// Запрос к Gemini — текст + изображение (base64)
-// ─────────────────────────────────────────────────────────────
-async Task<string> AskGeminiWithImageAsync(string question, byte[] imageData, string mimeType)
-{
-    if (string.IsNullOrWhiteSpace(apiKey))
-        return "❌ API-ключ Gemini не настроен на сервере.";
-
-    var base64 = Convert.ToBase64String(imageData);
-
-    var body = new
-    {
-        system_instruction = new { parts = new[] { new { text = SystemPrompt } } },
-        contents = new[]
-        {
-            new
-            {
-                role = "user",
-                parts = new object[]
-                {
-                    new { inline_data = new { mime_type = mimeType, data = base64 } },
-                    new { text = string.IsNullOrWhiteSpace(question)
-                        ? "Пожалуйста, разбери код или ошибку на этом скриншоте. Объясни что здесь происходит и как это исправить."
-                        : question }
-                }
-            }
-        },
-        generationConfig = new { temperature = 0.7, maxOutputTokens = 8192 }
-    };
-
-    return await CallGeminiAsync(body);
-}
-
-// ─────────────────────────────────────────────────────────────
-// Запрос к Gemini — текст + текстовый файл (.cs, .txt)
-// ─────────────────────────────────────────────────────────────
-async Task<string> AskGeminiWithFileAsync(string question, byte[] fileData, string fileName)
-{
-    if (string.IsNullOrWhiteSpace(apiKey))
-        return "❌ API-ключ Gemini не настроен на сервере.";
-
-    var fileText = Encoding.UTF8.GetString(fileData);
-    var prompt = string.IsNullOrWhiteSpace(question)
-        ? $"Проанализируй этот C# код из файла `{fileName}`. Найди проблемы, объясни что он делает и предложи улучшения:\n\n```csharp\n{fileText}\n```"
-        : $"{question}\n\nВот код из файла `{fileName}`:\n\n```csharp\n{fileText}\n```";
-
-    return await AskGeminiAsync(prompt);
-}
-
-// ─────────────────────────────────────────────────────────────
-// Общий метод вызова Gemini API
+// Вызов Gemini API — общий метод
 // ─────────────────────────────────────────────────────────────
 async Task<string> CallGeminiAsync(object body)
 {
     var content = new StringContent(
         JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
-
     var url = $"v1beta/models/gemini-3.5-flash-lite:generateContent?key={apiKey}";
 
     try
@@ -205,44 +198,136 @@ async Task<string> CallGeminiAsync(object body)
             .GetProperty("content")
             .GetProperty("parts")[0]
             .GetProperty("text")
-            .GetString() ?? "Пустой ответ от модели.";
+            .GetString() ?? "Пустой ответ.";
     }
-    catch (Exception ex)
-    {
-        return $"❌ Ошибка сети: {ex.Message}";
-    }
+    catch (Exception ex) { return $"❌ Ошибка сети: {ex.Message}"; }
 }
 
 // ─────────────────────────────────────────────────────────────
-// Отправить ответ в Telegram (с разбивкой на части если > 4096)
+// Gemini — текст с историей диалога
 // ─────────────────────────────────────────────────────────────
-async Task SendAnswerAsync(ITelegramBotClient bot, long chatId, string answer, CancellationToken ct)
+async Task<string> AskGeminiWithHistoryAsync(UserState state, string newQuestion)
+{
+    if (string.IsNullOrWhiteSpace(apiKey))
+        return "❌ API-ключ Gemini не настроен.";
+
+    // Формируем contents из истории + новый вопрос
+    var contents = new List<object>();
+    foreach (var msg in state.History)
+        contents.Add(new { role = msg.Role, parts = new[] { new { text = msg.Text } } });
+    contents.Add(new { role = "user", parts = new[] { new { text = newQuestion } } });
+
+    var body = new
+    {
+        system_instruction = new { parts = new[] { new { text = SystemPrompt } } },
+        contents,
+        generationConfig = new { temperature = 0.7, maxOutputTokens = 8192 }
+    };
+
+    return await CallGeminiAsync(body);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Gemini — фото + текст
+// ─────────────────────────────────────────────────────────────
+async Task<string> AskGeminiWithImageAsync(string question, byte[] imageData, string mimeType)
+{
+    if (string.IsNullOrWhiteSpace(apiKey)) return "❌ API-ключ Gemini не настроен.";
+
+    var base64 = Convert.ToBase64String(imageData);
+    var body = new
+    {
+        system_instruction = new { parts = new[] { new { text = SystemPrompt } } },
+        contents = new[]
+        {
+            new
+            {
+                role = "user",
+                parts = new object[]
+                {
+                    new { inline_data = new { mime_type = mimeType, data = base64 } },
+                    new { text = string.IsNullOrWhiteSpace(question)
+                        ? "Разбери код или ошибку на этом скриншоте. Объясни что происходит и как исправить."
+                        : question }
+                }
+            }
+        },
+        generationConfig = new { temperature = 0.7, maxOutputTokens = 8192 }
+    };
+    return await CallGeminiAsync(body);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Gemini — .cs файл
+// ─────────────────────────────────────────────────────────────
+async Task<string> AskGeminiWithFileAsync(string question, byte[] fileData, string fileName, UserState state)
+{
+    var fileText = Encoding.UTF8.GetString(fileData);
+    var prompt = string.IsNullOrWhiteSpace(question)
+        ? $"Проанализируй этот C# код из файла `{fileName}`. Найди проблемы, объясни что он делает и предложи улучшения:\n\n```csharp\n{fileText}\n```"
+        : $"{question}\n\nВот код из файла `{fileName}`:\n\n```csharp\n{fileText}\n```";
+
+    return await AskGeminiWithHistoryAsync(state, prompt);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Gemini — квиз: генерация вопроса
+// ─────────────────────────────────────────────────────────────
+async Task<string> GenerateQuizQuestionAsync()
+{
+    if (string.IsNullOrWhiteSpace(apiKey)) return "❌ API-ключ Gemini не настроен.";
+
+    var body = new
+    {
+        system_instruction = new { parts = new[] { new { text = QuizSystemPrompt } } },
+        contents = new[]
+        {
+            new { role = "user", parts = new[] { new { text = "Сгенерируй новый вопрос по C# для студента уровня Junior." } } }
+        },
+        generationConfig = new { temperature = 1.0, maxOutputTokens = 1024 }
+    };
+    return await CallGeminiAsync(body);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Отправить ответ с разбивкой на части
+// ─────────────────────────────────────────────────────────────
+async Task SendAnswerAsync(ITelegramBotClient bot, long chatId, string answer,
+    CancellationToken ct, InlineKeyboardMarkup? keyboard = null)
 {
     const int maxLen = 4000;
 
-    // Пробуем отправить с Markdown, если ошибка — отправляем plain text
-    async Task SendChunk(string chunk)
+    async Task SendChunk(string chunk, bool withKeyboard)
     {
         try
         {
-            await bot.SendMessage(chatId, chunk, parseMode: ParseMode.Markdown, cancellationToken: ct);
+            await bot.SendMessage(chatId, chunk,
+                parseMode: ParseMode.Markdown,
+                replyMarkup: withKeyboard ? keyboard : null,
+                cancellationToken: ct);
         }
         catch
         {
-            await bot.SendMessage(chatId, chunk, cancellationToken: ct);
+            await bot.SendMessage(chatId, chunk,
+                replyMarkup: withKeyboard ? keyboard : null,
+                cancellationToken: ct);
         }
     }
 
     if (answer.Length <= maxLen)
     {
-        await SendChunk(answer);
+        await SendChunk(answer, true);
         return;
     }
 
+    var parts = new List<string>();
     for (int i = 0; i < answer.Length; i += maxLen)
+        parts.Add(answer.Substring(i, Math.Min(maxLen, answer.Length - i)));
+
+    for (int i = 0; i < parts.Count; i++)
     {
-        await SendChunk(answer.Substring(i, Math.Min(maxLen, answer.Length - i)));
-        await Task.Delay(300, ct);
+        await SendChunk(parts[i], i == parts.Count - 1); // кнопки только в последней части
+        if (i < parts.Count - 1) await Task.Delay(300, ct);
     }
 }
 
@@ -257,70 +342,154 @@ if (!string.IsNullOrWhiteSpace(botToken))
     botClient.StartReceiving(
         updateHandler: async (bot, update, ct) =>
         {
+            // ── Обработка нажатий на inline-кнопки ──────────
+            if (update.CallbackQuery is { } query)
+            {
+                var userId   = query.From.Id;
+                var chatId   = query.Message!.Chat.Id;
+                var state    = GetState(userId);
+                var data     = query.Data ?? "";
+
+                await bot.AnswerCallbackQuery(query.Id, cancellationToken: ct);
+
+                switch (data)
+                {
+                    case "feedback_good":
+                        await bot.SendMessage(chatId,
+                            "Отлично! 💪 Задавай следующий вопрос или напиши /quiz для проверки знаний.",
+                            cancellationToken: ct);
+                        break;
+
+                    case "another_example":
+                        await bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
+                        var anotherEx = await AskGeminiWithHistoryAsync(state,
+                            "Покажи ещё один пример по той же теме, другой и более наглядный.");
+                        AddToHistory(state, "model", anotherEx);
+                        await SendAnswerAsync(bot, chatId, anotherEx, ct, GetAnswerKeyboard());
+                        break;
+
+                    case "explain_simpler":
+                        await bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
+                        var simpler = await AskGeminiWithHistoryAsync(state,
+                            "Объясни то же самое, но ещё проще — как будто я полный новичок. Используй бытовую аналогию.");
+                        AddToHistory(state, "model", simpler);
+                        await SendAnswerAsync(bot, chatId, simpler, ct, GetAnswerKeyboard());
+                        break;
+
+                    case "start_quiz":
+                    case "quiz_next":
+                        state.Mode = UserMode.Quiz;
+                        await bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
+                        var question = await GenerateQuizQuestionAsync();
+                        await SendAnswerAsync(bot, chatId, question, ct, GetQuizKeyboard());
+                        break;
+
+                    case "quiz_exit":
+                        state.Mode = UserMode.Normal;
+                        await bot.SendMessage(chatId,
+                            "Вышел из режима квиза. Задавай вопросы по C# 💬",
+                            cancellationToken: ct);
+                        break;
+                }
+                return;
+            }
+
+            // ── Обработка обычных сообщений ──────────────────
             if (update.Message is not { } message) return;
 
-            var chatId   = message.Chat.Id;
-            var username = message.From?.FirstName ?? "Студент";
-            var caption  = message.Caption ?? "";  // подпись под фото/файлом
+            var msgChatId  = message.Chat.Id;
+            var msgUserId  = message.From?.Id ?? 0;
+            var msgState   = GetState(msgUserId);
+            var username   = message.From?.FirstName ?? "Студент";
+            var caption    = message.Caption ?? "";
 
-            // ── /start ───────────────────────────────────────
+            // /start
             if (message.Text == "/start")
             {
-                await bot.SendMessage(chatId,
-                    $"👋 Привет, *{username}*\\!\n\n" +
-                    "Я — *C\\# Mentor*, твой ИИ\\-помощник по языку C\\#\\.\n\n" +
-                    "Что я умею:\n" +
-                    "💬 Отвечать на вопросы по C\\# и \\.NET\n" +
-                    "📷 Разбирать скриншоты с кодом или ошибками\n" +
-                    "📄 Анализировать \\.cs файлы\n\n" +
-                    "Просто напиши вопрос, пришли скриншот или файл\\! 🚀",
-                    parseMode: ParseMode.MarkdownV2, cancellationToken: ct);
+                msgState.History.Clear();
+                msgState.Mode = UserMode.Normal;
+                await bot.SendMessage(msgChatId,
+                    $"👋 Привет, *{username}*!\n\n" +
+                    "Я — *C# Mentor*, твой ИИ-помощник по C#.\n\n" +
+                    "Что умею:\n" +
+                    "💬 Отвечать на вопросы по C# и .NET\n" +
+                    "🧠 Помню контекст нашего диалога\n" +
+                    "📷 Разбирать скриншоты с кодом и ошибками\n" +
+                    "📄 Анализировать .cs файлы\n" +
+                    "🎯 Проверять знания через квиз (/quiz)\n\n" +
+                    "Просто напиши вопрос! 🚀",
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
                 return;
             }
 
-            // ── /help ────────────────────────────────────────
+            // /help
             if (message.Text == "/help")
             {
-                await bot.SendMessage(chatId,
-                    "*C\\# Mentor — что умею:*\n\n" +
-                    "💬 Задай вопрос текстом\n" +
-                    "📷 Пришли скриншот с ошибкой или кодом\n" +
-                    "📄 Пришли \\`.cs\\` или \\`.txt\\` файл с кодом\n" +
-                    "📷\\+💬 Фото с подписью — подпись станет вопросом\n\n" +
-                    "/start — приветствие",
-                    parseMode: ParseMode.MarkdownV2, cancellationToken: ct);
+                await bot.SendMessage(msgChatId,
+                    "*Команды:*\n\n" +
+                    "/start — начать заново\n" +
+                    "/quiz — режим проверки знаний\n" +
+                    "/clear — очистить историю диалога\n" +
+                    "/help — эта справка\n\n" +
+                    "*Можно присылать:*\n" +
+                    "💬 Текстовый вопрос\n" +
+                    "📷 Скриншот с кодом или ошибкой\n" +
+                    "📄 Файл .cs с кодом",
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
                 return;
             }
 
-            await bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
+            // /clear — сброс истории
+            if (message.Text == "/clear")
+            {
+                msgState.History.Clear();
+                msgState.Mode = UserMode.Normal;
+                await bot.SendMessage(msgChatId,
+                    "🗑 История очищена. Начинаем с чистого листа!",
+                    cancellationToken: ct);
+                return;
+            }
+
+            // /quiz — запуск квиза
+            if (message.Text == "/quiz")
+            {
+                msgState.Mode = UserMode.Quiz;
+                await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
+                await bot.SendMessage(msgChatId,
+                    "🎯 *Режим квиза активирован!*\n\nОтвечай на вопросы — проверим твои знания C#.",
+                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+                var q = await GenerateQuizQuestionAsync();
+                await SendAnswerAsync(bot, msgChatId, q, ct, GetQuizKeyboard());
+                return;
+            }
+
+            await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
 
             // ── Фото ─────────────────────────────────────────
             if (message.Photo is { } photos && photos.Length > 0)
             {
-                logger.LogInformation("TG [{User}]: фото (caption: '{Cap}')", username, caption);
-
-                // Берём фото в наилучшем качестве (последний элемент массива)
-                var bestPhoto = photos[^1];
-                var file = await DownloadTelegramFileAsync(bot, bestPhoto.FileId, "image/jpeg");
-
+                logger.LogInformation("TG [{User}]: фото", username);
+                var file = await DownloadTelegramFileAsync(bot, photos[^1].FileId, "image/jpeg");
                 if (file is null)
                 {
-                    await bot.SendMessage(chatId, "❌ Не удалось скачать фото.", cancellationToken: ct);
+                    await bot.SendMessage(msgChatId, "❌ Не удалось скачать фото.", cancellationToken: ct);
                     return;
                 }
-
-                var answer = await AskGeminiWithImageAsync(caption, file.Value.Data, file.Value.MimeType);
-                await SendAnswerAsync(bot, chatId, answer, ct);
+                var ans = await AskGeminiWithImageAsync(caption, file.Value.Data, file.Value.MimeType);
+                msgState.LastBotAnswer = ans;
+                AddToHistory(msgState, "user", string.IsNullOrWhiteSpace(caption) ? "[фото с кодом]" : caption);
+                AddToHistory(msgState, "model", ans);
+                await SendAnswerAsync(bot, msgChatId, ans, ct, GetAnswerKeyboard());
                 return;
             }
 
-            // ── Документ (.cs, .txt, .png, .jpg как файл) ───
+            // ── Документ ─────────────────────────────────────
             if (message.Document is { } doc)
             {
-                var fileName  = doc.FileName ?? "file";
-                var ext       = Path.GetExtension(fileName).ToLowerInvariant();
-                var isCode    = ext is ".cs" or ".txt" or ".json" or ".xml" or ".csproj";
-                var isImage   = ext is ".png" or ".jpg" or ".jpeg" or ".gif" or ".webp";
+                var fileName = doc.FileName ?? "file";
+                var ext      = Path.GetExtension(fileName).ToLowerInvariant();
+                var isImage  = ext is ".png" or ".jpg" or ".jpeg" or ".gif" or ".webp";
+                var isCode   = ext is ".cs" or ".txt" or ".json" or ".xml" or ".csproj";
 
                 logger.LogInformation("TG [{User}]: файл '{File}'", username, fileName);
 
@@ -329,42 +498,71 @@ if (!string.IsNullOrWhiteSpace(botToken))
 
                 if (file is null)
                 {
-                    await bot.SendMessage(chatId, "❌ Не удалось скачать файл.", cancellationToken: ct);
+                    await bot.SendMessage(msgChatId, "❌ Не удалось скачать файл.", cancellationToken: ct);
                     return;
                 }
 
-                string answer;
+                string ans;
                 if (isImage)
-                    answer = await AskGeminiWithImageAsync(caption, file.Value.Data, file.Value.MimeType);
+                    ans = await AskGeminiWithImageAsync(caption, file.Value.Data, file.Value.MimeType);
                 else if (isCode)
-                    answer = await AskGeminiWithFileAsync(caption, file.Value.Data, fileName);
+                    ans = await AskGeminiWithFileAsync(caption, file.Value.Data, fileName, msgState);
                 else
-                    answer = $"⚠️ Формат `{ext}` не поддерживается.\n\nПришли `.cs`, `.txt` файл или скриншот.";
+                {
+                    await bot.SendMessage(msgChatId,
+                        $"⚠️ Формат `{ext}` не поддерживается.\nПришли `.cs`, `.txt` или скриншот.",
+                        cancellationToken: ct);
+                    return;
+                }
 
-                await SendAnswerAsync(bot, chatId, answer, ct);
+                msgState.LastBotAnswer = ans;
+                AddToHistory(msgState, "user", $"[файл {fileName}] {caption}".Trim());
+                AddToHistory(msgState, "model", ans);
+                await SendAnswerAsync(bot, msgChatId, ans, ct, GetAnswerKeyboard());
                 return;
             }
 
-            // ── Обычный текстовый вопрос ─────────────────────
+            // ── Текст ─────────────────────────────────────────
             if (message.Text is { } text)
             {
-                logger.LogInformation("TG [{User}]: {Text}", username, text);
-                var answer = await AskGeminiAsync(text);
-                await SendAnswerAsync(bot, chatId, answer, ct);
+                logger.LogInformation("TG [{User}] [{Mode}]: {Text}", username, msgState.Mode, text);
+
+                string answer;
+
+                if (msgState.Mode == UserMode.Quiz)
+                {
+                    // В режиме квиза — принимаем ответ студента и оцениваем
+                    var evalPrompt = $"Студент ответил: \"{text}\"\n\nОцени ответ. Если правильно — похвали и объясни почему верно. Если неверно — объясни ошибку и дай правильный ответ с объяснением.";
+                    answer = await AskGeminiWithHistoryAsync(msgState, evalPrompt);
+                }
+                else
+                {
+                    // Обычный режим — с историей диалога
+                    answer = await AskGeminiWithHistoryAsync(msgState, text);
+                }
+
+                msgState.LastUserQuestion = text;
+                msgState.LastBotAnswer    = answer;
+                AddToHistory(msgState, "user",  text);
+                AddToHistory(msgState, "model", answer);
+
+                var keyboard = msgState.Mode == UserMode.Quiz ? GetQuizKeyboard() : GetAnswerKeyboard();
+                await SendAnswerAsync(bot, msgChatId, answer, ct, keyboard);
                 return;
             }
 
-            // ── Голосовое / стикер / прочее ──────────────────
-            await bot.SendMessage(chatId,
-                "Я понимаю текст, фото и .cs файлы.\nГолосовые сообщения пока не поддерживаю 🎤",
+            // Всё остальное (стикеры, голосовые и т.д.)
+            await bot.SendMessage(msgChatId,
+                "Понимаю текст, фото и .cs файлы.\nГолосовые пока не поддерживаю 🎤",
                 cancellationToken: ct);
         },
+
         errorHandler: (bot, ex, src, ct) =>
         {
             logger.LogError(ex, "Ошибка Telegram polling");
             return Task.CompletedTask;
         },
-        receiverOptions: new ReceiverOptions { AllowedUpdates = [UpdateType.Message] },
+        receiverOptions: new ReceiverOptions { AllowedUpdates = [UpdateType.Message, UpdateType.CallbackQuery] },
         cancellationToken: cts.Token
     );
 
@@ -393,11 +591,17 @@ app.MapPost("/api/ask", async (AskRequest request) =>
 {
     if (string.IsNullOrWhiteSpace(apiKey))
         return Results.Json(new { error = "API-ключ не найден." }, statusCode: 500);
-
     if (string.IsNullOrWhiteSpace(request.Question))
         return Results.BadRequest(new { error = "Вопрос не может быть пустым." });
 
-    var answer = await AskGeminiAsync(request.Question);
+    // Для веб-версии — без истории (stateless)
+    var body = new
+    {
+        system_instruction = new { parts = new[] { new { text = SystemPrompt } } },
+        contents = new[] { new { role = "user", parts = new[] { new { text = request.Question } } } },
+        generationConfig = new { temperature = 0.7, maxOutputTokens = 8192 }
+    };
+    var answer = await CallGeminiAsync(body);
     return answer.StartsWith("❌")
         ? Results.Json(new { error = answer }, statusCode: 500)
         : Results.Json(new { answer });
@@ -406,3 +610,20 @@ app.MapPost("/api/ask", async (AskRequest request) =>
 app.Run();
 
 record AskRequest(string Question);
+
+// ─────────────────────────────────────────────────────────────
+// Типы данных (должны быть после top-level statements)
+// ─────────────────────────────────────────────────────────────
+
+enum UserMode { Normal, Quiz }
+
+record ChatMessage(string Role, string Text);
+
+class UserState
+{
+    public UserMode Mode { get; set; } = UserMode.Normal;
+    public List<ChatMessage> History { get; } = new();
+    public string LastBotAnswer { get; set; } = "";
+    public string LastUserQuestion { get; set; } = "";
+    public DateTime LastActivity { get; set; } = DateTime.UtcNow;
+}
