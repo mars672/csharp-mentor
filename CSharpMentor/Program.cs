@@ -2199,8 +2199,8 @@ class UserDb
     {
         using var conn = new SqliteConnection(_connStr);
         conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
+
+        Execute(conn, """
             CREATE TABLE IF NOT EXISTS users (
                 user_id     INTEGER PRIMARY KEY,
                 username    TEXT NOT NULL DEFAULT '',
@@ -2211,13 +2211,26 @@ class UserDb
                 streak      INTEGER NOT NULL DEFAULT 0,
                 streak_date TEXT NOT NULL DEFAULT '',
                 last_active TEXT NOT NULL DEFAULT ''
-            );
+            )
+            """);
+
+        Execute(conn, """
             CREATE TABLE IF NOT EXISTS quiz_questions (
-                user_id     INTEGER NOT NULL,
-                question    TEXT NOT NULL,
+                user_id  INTEGER NOT NULL,
+                question TEXT NOT NULL,
                 PRIMARY KEY (user_id, question)
-            );
-            """;
+            )
+            """);
+
+        // Добавляем last_active если колонки ещё нет (миграция старой БД)
+        try { Execute(conn, "ALTER TABLE users ADD COLUMN last_active TEXT NOT NULL DEFAULT ''"); }
+        catch { /* уже существует */ }
+    }
+
+    private static void Execute(SqliteConnection conn, string sql)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
         cmd.ExecuteNonQuery();
     }
 
