@@ -290,6 +290,12 @@ InlineKeyboardMarkup GetDuelAnswerKeyboard(string code, int qIndex) => new(new[]
 // Отправить вопрос дуэли одному игроку
 async Task SendDuelQuestion(ITelegramBotClient bot, long chatId, DuelRoom room, int qIdx, CancellationToken ct)
 {
+    if (qIdx >= room.Questions.Count)
+    {
+        logger.LogError("SendDuelQuestion: qIdx={Q} >= Questions.Count={C}", qIdx, room.Questions.Count);
+        await bot.SendMessage(chatId, "❌ Ошибка при загрузке вопроса.", cancellationToken: ct);
+        return;
+    }
     var q   = room.Questions[qIdx];
     var sb  = new StringBuilder();
     sb.AppendLine($"\u2694\uFE0F *Дуэль [{room.Code}]* — вопрос {qIdx + 1}/{DuelRoom.TotalQuestions}");
@@ -691,7 +697,7 @@ async Task<QuizQuestion?> GenerateDuelQuestionAsync(List<string> usedTopics, Lis
         {
             new { role = "user", parts = new[] { new { text = $"Сгенерируй уникальный вопрос для дуэли. {usedHint}{questionsHint}" } } }
         },
-        generationConfig = new { temperature = 1.3, maxOutputTokens = 1024, responseMimeType = "application/json" }
+        generationConfig = new { temperature = 1.0, maxOutputTokens = 1024, responseMimeType = "application/json" }
     };
 
     var raw = await CallGeminiAsync(body);
@@ -1313,7 +1319,9 @@ if (!string.IsNullOrWhiteSpace(botToken))
                             var tmpQuestions2 = new List<string>();
                             for (int i = 0; i < DuelRoom.TotalQuestions; i++)
                             {
-                                var dq = await GenerateDuelQuestionAsync(tmpTopics2, tmpQuestions2);
+                                QuizQuestion? dq = null;
+                                for (int attempt = 0; attempt < 3 && dq is null; attempt++)
+                                    dq = await GenerateDuelQuestionAsync(tmpTopics2, tmpQuestions2);
                                 if (dq != null)
                                 {
                                     acceptRoom.Questions.Add(dq);
@@ -1833,7 +1841,11 @@ if (!string.IsNullOrWhiteSpace(botToken))
                     var tmpQuestions = new List<string>();
                     for (int i = 0; i < DuelRoom.TotalQuestions; i++)
                     {
-                        var q = await GenerateDuelQuestionAsync(tmpTopics, tmpQuestions);
+                        QuizQuestion? q = null;
+                        // До 3 попыток на случай если Gemini вернёт невалидный JSON
+                        for (int attempt = 0; attempt < 3 && q is null; attempt++)
+                            q = await GenerateDuelQuestionAsync(tmpTopics, tmpQuestions);
+
                         if (q != null)
                         {
                             room.Questions.Add(q);
