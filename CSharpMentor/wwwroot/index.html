@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>C# Mentor — ИИ-помощник</title>
+
+  <!-- Tailwind CSS (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- highlight.js — подсветка кода -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/csharp.min.js"></script>
+
+  <!-- marked.js — рендер Markdown -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <script>
+    // Настройка Tailwind — тёмный режим по классу
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 500: '#7c3aed', 600: '#6d28d9', 700: '#5b21b6' }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    /* Кастомный скроллбар */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
+
+    /* Стили для markdown-контента внутри ответа */
+    .prose-answer h1, .prose-answer h2, .prose-answer h3 {
+      font-weight: 700;
+      margin-top: 1.25rem;
+      margin-bottom: 0.5rem;
+      color: #e2e8f0;
+    }
+    .prose-answer h1 { font-size: 1.4rem; }
+    .prose-answer h2 { font-size: 1.2rem; }
+    .prose-answer h3 { font-size: 1.05rem; }
+
+    .prose-answer p {
+      margin-bottom: 0.75rem;
+      line-height: 1.7;
+      color: #cbd5e1;
+    }
+
+    .prose-answer ul, .prose-answer ol {
+      margin: 0.5rem 0 0.75rem 1.25rem;
+      color: #cbd5e1;
+    }
+    .prose-answer ul { list-style-type: disc; }
+    .prose-answer ol { list-style-type: decimal; }
+    .prose-answer li { margin-bottom: 0.3rem; }
+
+    /* Блоки кода */
+    .prose-answer pre {
+      border-radius: 0.5rem;
+      margin: 0.75rem 0;
+      overflow-x: auto;
+      font-size: 0.875rem;
+      line-height: 1.6;
+    }
+    .prose-answer pre code {
+      background: none !important;
+      padding: 0 !important;
+    }
+
+    /* Инлайн-код */
+    .prose-answer code:not(pre code) {
+      background-color: #374151;
+      color: #a5f3fc;
+      padding: 0.15rem 0.4rem;
+      border-radius: 0.25rem;
+      font-size: 0.875em;
+    }
+
+    /* Блок-цитата */
+    .prose-answer blockquote {
+      border-left: 3px solid #7c3aed;
+      padding-left: 1rem;
+      color: #94a3b8;
+      margin: 0.75rem 0;
+      font-style: italic;
+    }
+
+    /* Горизонтальная линия */
+    .prose-answer hr {
+      border-color: #374151;
+      margin: 1rem 0;
+    }
+
+    /* Анимация «печатает» */
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+    .typing-dot {
+      display: inline-block;
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #7c3aed;
+      animation: blink 1s infinite;
+      margin-right: 3px;
+    }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+    /* Анимация появления карточки */
+    @keyframes fadeSlideIn {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .fade-in { animation: fadeSlideIn 0.35s ease forwards; }
+
+    /* Textarea автоматически растягивается */
+    #questionInput {
+      resize: none;
+      overflow-y: hidden;
+      min-height: 52px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+
+<body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
+
+  <!-- ═══════════════  ШАПКА  ═══════════════ -->
+  <header class="border-b border-gray-800 bg-gray-900/80 backdrop-blur sticky top-0 z-10">
+    <div class="max-w-3xl mx-auto px-4 py-4 flex items-center gap-3">
+      <!-- Логотип -->
+      <div class="flex items-center justify-center w-10 h-10 rounded-xl bg-brand-500 shadow-lg shadow-brand-500/30 text-xl font-bold select-none">
+        C#
+      </div>
+      <div>
+        <h1 class="text-lg font-bold leading-tight">C# Mentor</h1>
+        <p class="text-xs text-gray-400">Интерактивный ИИ-помощник для студентов</p>
+      </div>
+      <!-- Бейдж модели -->
+      <div class="ml-auto">
+        <span class="text-xs bg-gray-800 text-gray-400 px-3 py-1 rounded-full border border-gray-700">
+          gemini-3.5-flash-lite
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══════════════  ОСНОВНОЙ КОНТЕНТ  ═══════════════ -->
+  <main class="flex-1 max-w-3xl w-full mx-auto px-4 py-6 flex flex-col gap-5">
+
+    <!-- ── Примеры вопросов (скрываются после первого запроса) ── -->
+    <div id="examplesBlock">
+      <p class="text-sm text-gray-500 mb-3 font-medium">Примеры вопросов:</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <button onclick="fillExample(this)" class="example-btn text-left text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-brand-500 text-gray-300 rounded-xl px-4 py-3 transition-all duration-200">
+          Что такое async/await в C#? Покажи пример
+        </button>
+        <button onclick="fillExample(this)" class="example-btn text-left text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-brand-500 text-gray-300 rounded-xl px-4 py-3 transition-all duration-200">
+          Объясни разницу между ref и out параметрами
+        </button>
+        <button onclick="fillExample(this)" class="example-btn text-left text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-brand-500 text-gray-300 rounded-xl px-4 py-3 transition-all duration-200">
+          Почему возникает NullReferenceException и как его исправить?
+        </button>
+        <button onclick="fillExample(this)" class="example-btn text-left text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-brand-500 text-gray-300 rounded-xl px-4 py-3 transition-all duration-200">
+          Расскажи про LINQ: Where, Select, FirstOrDefault
+        </button>
+      </div>
+    </div>
+
+    <!-- ── Контейнер ответов ── -->
+    <div id="answersContainer" class="flex flex-col gap-4"></div>
+
+  </main>
+
+  <!-- ═══════════════  ПАНЕЛЬ ВВОДА (прикреплена к низу)  ═══════════════ -->
+  <footer class="sticky bottom-0 bg-gray-950/90 backdrop-blur border-t border-gray-800">
+    <div class="max-w-3xl mx-auto px-4 py-4">
+      <div class="flex gap-3 items-end bg-gray-900 border border-gray-700 focus-within:border-brand-500 rounded-2xl px-4 py-3 transition-colors duration-200 shadow-xl">
+
+        <textarea
+          id="questionInput"
+          placeholder="Задай вопрос по C#... (Enter — отправить, Shift+Enter — новая строка)"
+          class="flex-1 bg-transparent text-gray-100 placeholder-gray-500 text-sm leading-relaxed outline-none"
+          rows="1"
+        ></textarea>
+
+        <button
+          id="sendBtn"
+          onclick="sendQuestion()"
+          title="Отправить (Enter)"
+          class="flex-shrink-0 flex items-center justify-center w-10 h-10 rounded-xl bg-brand-500 hover:bg-brand-600 active:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-lg shadow-brand-500/30"
+        >
+          <!-- Иконка отправки -->
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+        </button>
+
+      </div>
+      <p class="text-center text-xs text-gray-600 mt-2">
+        C# Mentor отвечает только на вопросы о C# и .NET
+      </p>
+    </div>
+  </footer>
+
+  <!-- ═══════════════  JAVASCRIPT  ═══════════════ -->
+  <script>
+    const questionInput = document.getElementById('questionInput');
+    const sendBtn       = document.getElementById('sendBtn');
+    const answersContainer = document.getElementById('answersContainer');
+    const examplesBlock = document.getElementById('examplesBlock');
+
+    let isFirstQuestion = true;
+
+    // ── Авторесайз textarea ──────────────────────────────────
+    questionInput.addEventListener('input', () => {
+      questionInput.style.height = 'auto';
+      questionInput.style.height = Math.min(questionInput.scrollHeight, 200) + 'px';
+    });
+
+    // ── Enter = отправить, Shift+Enter = новая строка ────────
+    questionInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendQuestion();
+      }
+    });
+
+    // ── Заполнить поле из примера ────────────────────────────
+    function fillExample(btn) {
+      questionInput.value = btn.textContent.trim();
+      questionInput.dispatchEvent(new Event('input'));
+      questionInput.focus();
+    }
+
+    // ── Основная функция отправки ────────────────────────────
+    async function sendQuestion() {
+      const question = questionInput.value.trim();
+      if (!question) return;
+
+      // Блокируем кнопку на время запроса
+      sendBtn.disabled = true;
+      questionInput.value = '';
+      questionInput.style.height = 'auto';
+
+      // Скрываем примеры после первого вопроса
+      if (isFirstQuestion) {
+        examplesBlock.style.display = 'none';
+        isFirstQuestion = false;
+      }
+
+      // Отображаем пузырь с вопросом
+      appendQuestionBubble(question);
+
+      // Отображаем индикатор «Печатает...»
+      const typingCard = appendTypingIndicator();
+
+      // ── Запрос к бэкенду ──────────────────────────────────
+      try {
+        const res = await fetch('/api/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question })
+        });
+
+        const data = await res.json();
+
+        // Убираем индикатор
+        typingCard.remove();
+
+        if (!res.ok || data.error) {
+          appendErrorCard(data.error ?? `HTTP ${res.status}`);
+        } else {
+          appendAnswerCard(data.answer);
+        }
+      } catch (err) {
+        typingCard.remove();
+        appendErrorCard('Не удалось подключиться к серверу. Убедитесь, что бэкенд запущен.');
+      } finally {
+        sendBtn.disabled = false;
+        questionInput.focus();
+      }
+    }
+
+    // ── Пузырь вопроса ───────────────────────────────────────
+    function appendQuestionBubble(text) {
+      const div = document.createElement('div');
+      div.className = 'fade-in flex justify-end';
+      div.innerHTML = `
+        <div class="max-w-[80%] bg-brand-600 text-white rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed shadow-md">
+          ${escapeHtml(text)}
+        </div>`;
+      answersContainer.appendChild(div);
+      scrollToBottom();
+    }
+
+    // ── Индикатор «Печатает...» ──────────────────────────────
+    function appendTypingIndicator() {
+      const div = document.createElement('div');
+      div.className = 'fade-in flex items-start gap-3';
+      div.innerHTML = `
+        <div class="flex-shrink-0 flex items-center justify-center w-9 h-9 rounded-xl bg-brand-500/20 text-brand-400 text-xs font-bold">C#</div>
+        <div class="bg-gray-800 border border-gray-700 rounded-2xl rounded-tl-sm px-5 py-4 flex items-center gap-1">
+          <span class="typing-dot"></span>
+          <span class="typing-dot"></span>
+          <span class="typing-dot"></span>
+          <span class="text-xs text-gray-500 ml-2">Ментор думает...</span>
+        </div>`;
+      answersContainer.appendChild(div);
+      scrollToBottom();
+      return div;
+    }
+
+    // ── Карточка с ответом (Markdown) ────────────────────────
+    function appendAnswerCard(markdownText) {
+      // Рендерим Markdown → HTML
+      const html = marked.parse(markdownText);
+
+      const div = document.createElement('div');
+      div.className = 'fade-in flex items-start gap-3';
+      div.innerHTML = `
+        <div class="flex-shrink-0 flex items-center justify-center w-9 h-9 rounded-xl bg-brand-500/20 text-brand-400 text-xs font-bold select-none">C#</div>
+        <div class="flex-1 bg-gray-800/80 border border-gray-700 rounded-2xl rounded-tl-sm px-5 py-4 shadow-md">
+          <div class="prose-answer">${html}</div>
+          <div class="mt-3 pt-3 border-t border-gray-700 flex justify-between items-center">
+            <span class="text-xs text-gray-600">C# Mentor · gemini-3.5-flash-lite</span>
+            <button onclick="copyAnswer(this)" class="text-xs text-gray-500 hover:text-gray-300 flex items-center gap-1 transition-colors">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              Копировать
+            </button>
+          </div>
+        </div>`;
+
+      answersContainer.appendChild(div);
+
+      // Подсветка синтаксиса для всех блоков кода
+      div.querySelectorAll('pre code').forEach(block => {
+        hljs.highlightElement(block);
+      });
+
+      scrollToBottom();
+    }
+
+    // ── Карточка с ошибкой ───────────────────────────────────
+    function appendErrorCard(message) {
+      const div = document.createElement('div');
+      div.className = 'fade-in flex items-start gap-3';
+      div.innerHTML = `
+        <div class="flex-shrink-0 flex items-center justify-center w-9 h-9 rounded-xl bg-red-500/20 text-red-400 text-sm font-bold">!</div>
+        <div class="flex-1 bg-red-950/40 border border-red-800/60 rounded-2xl rounded-tl-sm px-5 py-4">
+          <p class="text-sm font-semibold text-red-400 mb-1">Ошибка</p>
+          <p class="text-sm text-red-300">${escapeHtml(message)}</p>
+        </div>`;
+      answersContainer.appendChild(div);
+      scrollToBottom();
+    }
+
+    // ── Копировать текст ответа ──────────────────────────────
+    function copyAnswer(btn) {
+      const proseDiv = btn.closest('.bg-gray-800\\/80')?.querySelector('.prose-answer');
+      if (!proseDiv) return;
+      navigator.clipboard.writeText(proseDiv.innerText).then(() => {
+        btn.textContent = 'Скопировано!';
+        setTimeout(() => {
+          btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg> Копировать`;
+        }, 2000);
+      });
+    }
+
+    // ── Вспомогательные ─────────────────────────────────────
+    function scrollToBottom() {
+      setTimeout(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }), 50);
+    }
+
+    function escapeHtml(text) {
+      return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    // ── Фокус на поле ввода при загрузке ────────────────────
+    questionInput.focus();
+  </script>
+</body>
+</html>
