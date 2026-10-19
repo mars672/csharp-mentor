@@ -1669,6 +1669,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
 
                     var notified   = 0;
                     var activeIds  = userDb.GetActiveUserIds(msgUserId);
+                    logger.LogInformation("Duel broadcast: found {Count} active users", activeIds.Count);
 
                     foreach (var uid in activeIds)
                     {
@@ -2249,7 +2250,7 @@ class UserDb
             """;
         cmd.Parameters.AddWithValue("$id",   userId);
         cmd.Parameters.AddWithValue("$name", username);
-        cmd.Parameters.AddWithValue("$ts",   DateTime.UtcNow.ToString("o"));
+        cmd.Parameters.AddWithValue("$ts",   DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"));
         cmd.ExecuteNonQuery();
     }
 
@@ -2263,7 +2264,7 @@ class UserDb
             SELECT user_id FROM users
             WHERE user_id != $excl
               AND last_active != ''
-              AND datetime(last_active) > datetime('now', '-7 days')
+              AND last_active > datetime('now', '-7 days')
             ORDER BY last_active DESC
             LIMIT 200
             """;
@@ -2272,6 +2273,16 @@ class UserDb
         var result = new List<long>();
         while (r.Read()) result.Add(r.GetInt64(0));
         return result;
+    }
+
+    // Для отладки — все пользователи в БД
+    public int GetTotalUsersCount()
+    {
+        using var conn = new SqliteConnection(_connStr);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM users";
+        return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
     // Загрузить данные пользователя в UserState
