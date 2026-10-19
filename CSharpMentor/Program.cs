@@ -138,6 +138,76 @@ const string InterviewSystemPrompt = """
 """;
 
 // ─────────────────────────────────────────────────────────────
+// Структура роадмапа — этапы и темы
+// ─────────────────────────────────────────────────────────────
+var LearnStages = new Dictionary<string, string[]>
+{
+    ["📦 Основы"] = new[]
+    {
+        "Типы данных (int, string, bool, double)",
+        "Переменные и константы",
+        "Арифметические операторы",
+        "Логические операторы",
+        "Условия if / else / switch",
+        "Цикл for",
+        "Цикл while и do-while",
+        "Цикл foreach",
+        "Массивы",
+        "Методы и параметры",
+        "Null и nullable типы"
+    },
+    ["🏗 ООП"] = new[]
+    {
+        "Классы и объекты",
+        "Конструкторы",
+        "Свойства (get / set)",
+        "Наследование",
+        "Полиморфизм",
+        "Интерфейсы",
+        "Абстрактные классы",
+        "Инкапсуляция (public / private)",
+        "Generics (List<T>)"
+    },
+    ["⚡ Продвинутый C#"] = new[]
+    {
+        "Исключения (try / catch / finally)",
+        "Делегаты",
+        "События (events)",
+        "Лямбда-выражения",
+        "LINQ: Where и Select",
+        "LINQ: OrderBy и GroupBy",
+        "async / await",
+        "Task и многопоточность",
+        "Работа с файлами"
+    },
+    ["🌐 .NET экосистема"] = new[]
+    {
+        "ASP.NET Core — основы",
+        "REST API и HTTP",
+        "Entity Framework Core",
+        "Dependency Injection",
+        "Юнит-тесты (xUnit)",
+        "NuGet пакеты",
+        "Docker основы"
+    }
+};
+
+const string LearnSystemPrompt = """
+Ты — опытный преподаватель C#. Твоя задача — дать студенту чёткий мини-урок по конкретной теме.
+
+Структура урока (строго соблюдай):
+1. **Что это такое** — 2-3 предложения простым языком
+2. **Зачем нужно** — практическое применение
+3. **Пример кода** — рабочий C# код с комментариями к каждой строке
+4. **Разбор примера** — объяснение что происходит
+5. **Типичная ошибка** — что новички делают неправильно + как исправить
+6. **Совет** — одна практическая рекомендация
+
+Форматируй код в блоках ```csharp.
+Пиши конкретно и по делу. Урок должен занимать 3-5 минут чтения.
+""";
+
+// ─────────────────────────────────────────────────────────────
 // Хранение состояния пользователей (в памяти)
 // ─────────────────────────────────────────────────────────────
 
@@ -441,13 +511,65 @@ InlineKeyboardMarkup GetInterviewKeyboard() => new(new[]
 {
     new[]
     {
-        InlineKeyboardButton.WithCallbackData("🚪 Завершить интервью", "interview_exit"),
+        InlineKeyboardButton.WithCallbackData("\U0001F6AA Завершить интервью", "interview_exit"),
+    }
+});
+
+// Кнопки выбора этапа роадмапа
+InlineKeyboardMarkup GetLearnStagesKeyboard() => new(
+    LearnStages.Keys.Select(stage =>
+        new[] { InlineKeyboardButton.WithCallbackData(stage, $"learn_stage_{stage}") }
+    ).Append(new[] { InlineKeyboardButton.WithCallbackData("\U0001F6AA Выйти", "learn_exit") })
+    .ToArray()
+);
+
+// Кнопки выбора темы внутри этапа
+InlineKeyboardMarkup GetLearnTopicsKeyboard(string stage)
+{
+    var topics = LearnStages[stage];
+    var rows = topics.Select(t =>
+        new[] { InlineKeyboardButton.WithCallbackData(t, $"learn_topic_{t}") }
+    ).Append(new[]
+    {
+        InlineKeyboardButton.WithCallbackData("\U0001F519 Назад к этапам", "learn_back"),
+        InlineKeyboardButton.WithCallbackData("\U0001F6AA Выйти", "learn_exit"),
+    }).ToArray();
+    return new InlineKeyboardMarkup(rows);
+}
+
+// Кнопки после урока
+InlineKeyboardMarkup GetAfterLessonKeyboard(string stage) => new(new[]
+{
+    new[]
+    {
+        InlineKeyboardButton.WithCallbackData("\U0001F4DA Другие темы", $"learn_stage_{stage}"),
+        InlineKeyboardButton.WithCallbackData("\U0001F519 К этапам", "learn_back"),
+    },
+    new[]
+    {
+        InlineKeyboardButton.WithCallbackData("\U0001F4DD Задание по теме", "challenge_next"),
+        InlineKeyboardButton.WithCallbackData("\U0001F3AF Квиз", "start_quiz"),
     }
 });
 
 // ─────────────────────────────────────────────────────────────
-// Gemini — генерация задания для challenge
+// Gemini — генерация мини-урока
 // ─────────────────────────────────────────────────────────────
+async Task<string> GenerateLessonAsync(string topic)
+{
+    if (string.IsNullOrWhiteSpace(apiKey)) return "❌ API-ключ Gemini не настроен.";
+
+    var body = new
+    {
+        system_instruction = new { parts = new[] { new { text = LearnSystemPrompt } } },
+        contents = new[]
+        {
+            new { role = "user", parts = new[] { new { text = $"Дай мини-урок по теме: «{topic}» в C#" } } }
+        },
+        generationConfig = new { temperature = 0.7, maxOutputTokens = 4096 }
+    };
+    return await CallGeminiAsync(body);
+}
 async Task<(string BrokenCode, string Hint, string FixedCode, string Explanation, string Description, string Topic)?> GenerateChallengeAsync(List<string> usedTopics)
 {
     if (string.IsNullOrWhiteSpace(apiKey)) return null;
@@ -771,13 +893,64 @@ if (!string.IsNullOrWhiteSpace(botToken))
                         state.InterviewHistory.Clear();
                         state.InterviewQuestionCount = 0;
                         await bot.SendMessage(chatId,
-                            $"Интервью завершено досрочно после {qCount} вопр.\n\nЗадавай вопросы по C# 💬",
+                            $"Интервью завершено досрочно после {qCount} вопр.\n\nЗадавай вопросы по C# \U0001F4AC",
                             cancellationToken: ct);
                         break;
                     }
 
+                    // ── Learn кнопки ──────────────────────────
+                    case "learn_back":
+                        state.Mode = UserMode.Learn;
+                        await bot.SendMessage(chatId,
+                            "\U0001F4DA *Выбери этап для изучения:*",
+                            parseMode: ParseMode.Markdown,
+                            replyMarkup: GetLearnStagesKeyboard(),
+                            cancellationToken: ct);
+                        break;
+
+                    case "learn_exit":
+                        state.Mode = UserMode.Normal;
+                        state.CurrentLearnStage = "";
+                        await bot.SendMessage(chatId,
+                            "Вышел из режима обучения. Задавай вопросы по C# \U0001F4AC",
+                            cancellationToken: ct);
+                        break;
+
+                    default:
+                        // learn_stage_XXX — выбор этапа
+                        if (data.StartsWith("learn_stage_"))
+                        {
+                            var stage = data.Replace("learn_stage_", "");
+                            if (LearnStages.ContainsKey(stage))
+                            {
+                                state.CurrentLearnStage = stage;
+                                state.Mode = UserMode.Learn;
+                                await bot.SendMessage(chatId,
+                                    $"\U0001F4DA *{stage}*\n\nВыбери тему для изучения:",
+                                    parseMode: ParseMode.Markdown,
+                                    replyMarkup: GetLearnTopicsKeyboard(stage),
+                                    cancellationToken: ct);
+                            }
+                        }
+                        // learn_topic_XXX — выбор темы → генерируем урок
+                        else if (data.StartsWith("learn_topic_"))
+                        {
+                            var topic = data.Replace("learn_topic_", "");
+                            await bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
+                            await bot.SendMessage(chatId,
+                                $"\U0001F4D6 Готовлю урок по теме *«{topic}»*...",
+                                parseMode: ParseMode.Markdown, cancellationToken: ct);
+
+                            var lesson = await GenerateLessonAsync(topic);
+                            var stage2 = state.CurrentLearnStage;
+                            await SendAnswerAsync(bot, chatId, lesson, ct,
+                                string.IsNullOrEmpty(stage2) ? null : GetAfterLessonKeyboard(stage2));
+                        }
+                        break;
+
                     case "quiz_answer_A":
-                    case "quiz_answer_B":                    case "quiz_answer_C":
+                    case "quiz_answer_B":
+                    case "quiz_answer_C":
                     case "quiz_answer_D":
                     {
                         var chosen = data.Replace("quiz_answer_", ""); // "A", "B", "C" или "D"
@@ -839,9 +1012,9 @@ if (!string.IsNullOrWhiteSpace(botToken))
                 // Главное меню — кнопки-плитки внизу экрана
                 var mainMenu = new ReplyKeyboardMarkup(new[]
                 {
-                    new[] { new KeyboardButton("\U0001F3AF Квиз"),         new KeyboardButton("\U0001F527 Задание") },
-                    new[] { new KeyboardButton("\U0001F3A4 Собеседование"), new KeyboardButton("\U0001F5FA Роадмап") },
-                    new[] { new KeyboardButton("\u2753 Помощь") },
+                    new[] { new KeyboardButton("\U0001F3AF Квиз"),          new KeyboardButton("\U0001F527 Задание") },
+                    new[] { new KeyboardButton("\U0001F3A4 Собеседование"),  new KeyboardButton("\U0001F4DA Учиться") },
+                    new[] { new KeyboardButton("\U0001F5FA Роадмап"),        new KeyboardButton("\u2753 Помощь") },
                 })
                 { ResizeKeyboard = true, OneTimeKeyboard = false };
 
@@ -922,6 +1095,20 @@ if (!string.IsNullOrWhiteSpace(botToken))
             {
                 await bot.SendMessage(msgChatId, RoadmapText,
                     parseMode: ParseMode.Markdown, cancellationToken: ct);
+                return;
+            }
+
+            // /learn — интерактивное изучение тем из роадмапа
+            if (message.Text == "/learn")
+            {
+                msgState.Mode = UserMode.Learn;
+                msgState.CurrentLearnStage = "";
+                await bot.SendMessage(msgChatId,
+                    "\U0001F4DA *Режим обучения*\n\n" +
+                    "Выбери этап — я дам тебе подробный урок по любой теме:",
+                    parseMode: ParseMode.Markdown,
+                    replyMarkup: GetLearnStagesKeyboard(),
+                    cancellationToken: ct);
                 return;
             }
 
@@ -1047,6 +1234,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
                     "\U0001F3AF Квиз"          => "/quiz",
                     "\U0001F527 Задание"        => "/challenge",
                     "\U0001F3A4 Собеседование"  => "/interview",
+                    "\U0001F4DA Учиться"        => "/learn",
                     "\U0001F5FA Роадмап"        => "/roadmap",
                     "\u2753 Помощь"             => "/help",
                     _                           => null
@@ -1114,16 +1302,26 @@ if (!string.IsNullOrWhiteSpace(botToken))
                                 await bot.SendMessage(msgChatId, RoadmapText,
                                     parseMode: ParseMode.Markdown, cancellationToken: ct);
                                 break;
+                            case "/learn":
+                                msgState.Mode = UserMode.Learn;
+                                msgState.CurrentLearnStage = "";
+                                await bot.SendMessage(msgChatId,
+                                    "\U0001F4DA *Режим обучения*\n\nВыбери этап:",
+                                    parseMode: ParseMode.Markdown,
+                                    replyMarkup: GetLearnStagesKeyboard(),
+                                    cancellationToken: ct);
+                                break;
                             case "/help":
                                 await bot.SendMessage(msgChatId,
                                     "*Команды:*\n\n" +
-                                    "/quiz — проверка знаний 🎯\n" +
-                                    "/challenge — исправь код 🔧\n" +
-                                    "/interview — собеседование 🎤\n" +
-                                    "/roadmap — план изучения 🗺\n" +
+                                    "/quiz — проверка знаний \U0001F3AF\n" +
+                                    "/challenge — исправь код \U0001F527\n" +
+                                    "/interview — собеседование \U0001F3A4\n" +
+                                    "/learn — изучение тем \U0001F4DA\n" +
+                                    "/roadmap — план изучения \U0001F5FA\n" +
                                     "/clear — очистить историю\n" +
                                     "/start — главное меню\n\n" +
-                                    "Или просто напиши вопрос по C# 💬",
+                                    "Или просто напиши вопрос по C# \U0001F4AC",
                                     parseMode: ParseMode.Markdown, cancellationToken: ct);
                                 break;
                         }
@@ -1218,13 +1416,14 @@ if (!string.IsNullOrWhiteSpace(botToken))
         // ── Регистрируем команды — появятся в меню "/" у пользователя
         await botClient.SetMyCommands(new[]
         {
-            new BotCommand { Command = "start",     Description = "🏠 Главное меню" },
-            new BotCommand { Command = "quiz",      Description = "🎯 Проверить знания" },
-            new BotCommand { Command = "challenge", Description = "🔧 Задание: исправь код" },
-            new BotCommand { Command = "interview", Description = "🎤 Симуляция собеседования" },
-            new BotCommand { Command = "roadmap",   Description = "🗺 План изучения C#" },
-            new BotCommand { Command = "clear",     Description = "🗑 Очистить историю диалога" },
-            new BotCommand { Command = "help",      Description = "❓ Справка" },
+            new BotCommand { Command = "start",     Description = "\U0001F3E0 Главное меню" },
+            new BotCommand { Command = "learn",     Description = "\U0001F4DA Изучить тему из роадмапа" },
+            new BotCommand { Command = "quiz",      Description = "\U0001F3AF Проверить знания" },
+            new BotCommand { Command = "challenge", Description = "\U0001F527 Задание: исправь код" },
+            new BotCommand { Command = "interview", Description = "\U0001F3A4 Симуляция собеседования" },
+            new BotCommand { Command = "roadmap",   Description = "\U0001F5FA План изучения C#" },
+            new BotCommand { Command = "clear",     Description = "\U0001F5D1 Очистить историю диалога" },
+            new BotCommand { Command = "help",      Description = "\u2753 Справка" },
         });
         logger.LogInformation("✅ Команды зарегистрированы");
     }
@@ -1272,7 +1471,7 @@ record AskRequest(string Question);
 // Типы данных (должны быть после top-level statements)
 // ─────────────────────────────────────────────────────────────
 
-enum UserMode { Normal, Quiz, Challenge, Interview }
+enum UserMode { Normal, Quiz, Challenge, Interview, Learn }
 
 record ChatMessage(string Role, string Text);
 
@@ -1313,4 +1512,6 @@ class UserState
     // Interview — история диалога собеседования
     public List<ChatMessage> InterviewHistory { get; } = new();
     public int InterviewQuestionCount { get; set; } = 0;
+    // Learn — текущий выбранный этап
+    public string CurrentLearnStage { get; set; } = "";
 }
