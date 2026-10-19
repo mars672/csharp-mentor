@@ -1185,12 +1185,15 @@ if (!string.IsNullOrWhiteSpace(botToken))
                         {
                             var code = data.Replace("duel_accept_", "");
 
-                            if (userDuels.ContainsKey(userId))
+                            if (userDuels.TryGetValue(userId, out var existCode2)
+                                && duelRooms.ContainsKey(existCode2))
                             {
                                 await bot.AnswerCallbackQuery(query.Id,
                                     "Ты уже в дуэли!", showAlert: true, cancellationToken: ct);
                                 break;
                             }
+                            // Очищаем устаревшую запись
+                            userDuels.TryRemove(userId, out var staleCode2);
                             if (!duelRooms.TryGetValue(code, out var acceptRoom))
                             {
                                 await bot.AnswerCallbackQuery(query.Id,
@@ -1484,6 +1487,10 @@ if (!string.IsNullOrWhiteSpace(botToken))
             var msgState   = GetState(msgUserId, username);
             var caption    = message.Caption ?? "";
 
+            // Записываем пользователя в БД для рассылок
+            if (msgUserId != 0)
+                userDb.TouchUser(msgUserId, username);
+
             // /start
             if (message.Text == "/start")
             {
@@ -1612,14 +1619,17 @@ if (!string.IsNullOrWhiteSpace(botToken))
             // /duel — создать или присоединиться к дуэли
             if (message.Text != null && (message.Text == "/duel" || message.Text.StartsWith("/duel ")))
             {
-                // Если уже в дуэли
-                if (userDuels.ContainsKey(msgUserId))
+                // Если уже в дуэли — но проверяем что она реально существует
+                if (userDuels.TryGetValue(msgUserId, out var existingCode)
+                    && duelRooms.ContainsKey(existingCode))
                 {
                     await bot.SendMessage(msgChatId,
                         "\u26A0\uFE0F Ты уже в дуэли! Дождись её завершения.",
                         cancellationToken: ct);
                     return;
                 }
+                // Очищаем устаревшую запись если комнаты уже нет
+                userDuels.TryRemove(msgUserId, out var staleCode);
 
                 var parts = message.Text.Split(' ');
 
@@ -1646,7 +1656,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
                         $"Жду соперника (5 минут)...",
                         parseMode: ParseMode.Markdown, cancellationToken: ct);
 
-                    // Рассылаем вызов всем активным пользователям (кроме самого игрока)
+                    // Рассылаем вызов всем активным пользователям из БД (кроме самого игрока)
                     var challengeKeyboard = new InlineKeyboardMarkup(new[]
                     {
                         new[]
@@ -1657,15 +1667,13 @@ if (!string.IsNullOrWhiteSpace(botToken))
                         }
                     });
 
-                    var notified = 0;
-                    var activeUsers = userStates
-                        .Where(kv => kv.Key != msgUserId
-                            && !userDuels.ContainsKey(kv.Key)
-                            && (DateTime.UtcNow - kv.Value.LastActivity).TotalHours < 24)
-                        .ToList();
+                    var notified   = 0;
+                    var activeIds  = userDb.GetActiveUserIds(msgUserId);
 
-                    foreach (var (uid, _) in activeUsers)
+                    foreach (var uid in activeIds)
                     {
+                        // Пропускаем тех кто уже в дуэли
+                        if (userDuels.ContainsKey(uid)) continue;
                         try
                         {
                             await bot.SendMessage(uid,
@@ -2201,7 +2209,8 @@ class UserDb
                 challenges  INTEGER NOT NULL DEFAULT 0,
                 lessons     INTEGER NOT NULL DEFAULT 0,
                 streak      INTEGER NOT NULL DEFAULT 0,
-                streak_date TEXT NOT NULL DEFAULT ''
+                streak_date TEXT NOT NULL DEFAULT '',
+                last_active TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS quiz_questions (
                 user_id     INTEGER NOT NULL,
@@ -2210,6 +2219,46 @@ class UserDb
             );
             """;
         cmd.ExecuteNonQuery();
+    }
+
+    // Записать пользователя как активного (вызывается при каждом сообщении)
+    public void TouchUser(long userId, string username)
+    {
+        using var conn = new SqliteConnection(_connStr);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO users (user_id, username, last_active)
+            VALUES ($id, $name, $ts)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username    = excluded.username,
+                last_active = excluded.last_active;
+            """;
+        cmd.Parameters.AddWithValue("$id",   userId);
+        cmd.Parameters.AddWithValue("$name", username);
+        cmd.Parameters.AddWithValue("$ts",   DateTime.UtcNow.ToString("o"));
+        cmd.ExecuteNonQuery();
+    }
+
+    // Все пользователи активные за последние 7 дней
+    public List<long> GetActiveUserIds(long excludeUserId)
+    {
+        using var conn = new SqliteConnection(_connStr);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT user_id FROM users
+            WHERE user_id != $excl
+              AND last_active != ''
+              AND datetime(last_active) > datetime('now', '-7 days')
+            ORDER BY last_active DESC
+            LIMIT 200
+            """;
+        cmd.Parameters.AddWithValue("$excl", excludeUserId);
+        using var r = cmd.ExecuteReader();
+        var result = new List<long>();
+        while (r.Read()) result.Add(r.GetInt64(0));
+        return result;
     }
 
     // Загрузить данные пользователя в UserState
