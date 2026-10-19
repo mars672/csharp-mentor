@@ -1,5 +1,5 @@
 # Этап 1: сборка
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Копируем .csproj и восстанавливаем зависимости (кэшируется)
@@ -14,15 +14,13 @@ RUN dotnet publish CSharpMentor/CSharpMentor.csproj \
     --no-restore
 
 # Этап 2: финальный образ (только runtime, без SDK — меньше размер)
-FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
 # Копируем собранное приложение
 COPY --from=build /app/publish .
 
-# Railway передаёт порт через переменную PORT
-ENV ASPNETCORE_URLS=http://+:${PORT:-8080}
-
 EXPOSE 8080
 
-ENTRYPOINT ["dotnet", "CSharpMentor.dll"]
+# Railway передаёт порт через переменную PORT (читается при запуске контейнера)
+ENTRYPOINT ["sh", "-c", "ASPNETCORE_URLS=http://+:${PORT:-8080} exec dotnet CSharpMentor.dll"]
