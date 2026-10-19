@@ -1362,50 +1362,61 @@ if (!string.IsNullOrWhiteSpace(botToken))
                                 var isP2     = userId == room.Player2Id;
                                 if (!isP1 && !isP2) break;
 
-                                var q        = room.Questions[qIdx];
-                                var correct  = choice.Equals(q.Correct, StringComparison.OrdinalIgnoreCase);
-                                var myName   = isP1 ? room.Player1Name : room.Player2Name;
-                                var myScore  = isP1 ? room.Player1Score : room.Player2Score;
-                                var myAns    = isP1 ? room.Player1Answered : room.Player2Answered;
+                                // myAnswered = сколько вопросов уже ответил этот игрок
+                                // следующий ожидаемый вопрос = myAnswered
+                                var myAnswered = isP1 ? room.Player1Answered : room.Player2Answered;
 
-                                // Не даём ответить дважды на один вопрос
-                                if (myAns != qIdx) { await bot.AnswerCallbackQuery(query.Id, cancellationToken: ct); break; }
+                                // Не даём ответить на вопрос не в очереди
+                                if (myAnswered != qIdx)
+                                {
+                                    await bot.AnswerCallbackQuery(query.Id,
+                                        "Ты уже ответил на этот вопрос!", cancellationToken: ct);
+                                    break;
+                                }
 
-                                // Засчитываем ответ
+                                await bot.AnswerCallbackQuery(query.Id, cancellationToken: ct);
+
+                                var q       = room.Questions[qIdx];
+                                var correct = choice.Equals(q.Correct, StringComparison.OrdinalIgnoreCase);
+
+                                // Засчитываем очко
                                 if (correct)
                                 {
                                     if (isP1) room.Player1Score++;
                                     else      room.Player2Score++;
                                 }
+
+                                // Увеличиваем счётчик ответов — теперь ждём следующий вопрос
                                 if (isP1) room.Player1Answered++;
                                 else      room.Player2Answered++;
 
-                                // Показываем результат этого вопроса
+                                // Показываем результат
                                 var correctText = q.Correct switch { "A" => q.A, "B" => q.B, "C" => q.C, _ => q.D };
-                                var emoji = correct ? "\u2705" : "\u274C";
+                                var resultEmoji = correct ? "\u2705" : "\u274C";
+                                var myNewScore  = isP1 ? room.Player1Score : room.Player2Score;
+                                var myNewAns    = isP1 ? room.Player1Answered : room.Player2Answered;
+
                                 await bot.SendMessage(chatId,
-                                    $"{emoji} *{(correct ? "Правильно" : "Неверно")}!*\n" +
+                                    $"{resultEmoji} *{(correct ? "Правильно" : "Неверно")}!*\n" +
                                     $"Правильный ответ: *{q.Correct})* {correctText}\n\n" +
-                                    $"{q.Explanation}",
+                                    $"{q.Explanation}\n\n" +
+                                    $"Счёт: *{myNewScore}/{myNewAns}*",
                                     parseMode: ParseMode.Markdown, cancellationToken: ct);
 
-                                // Следующий вопрос или ожидание
+                                // Следующий вопрос
                                 var nextIdx = qIdx + 1;
                                 if (nextIdx < DuelRoom.TotalQuestions)
                                 {
                                     await SendDuelQuestion(bot, chatId, room, nextIdx, ct);
-                                    if (isP1) room.Player1Answered = nextIdx;
-                                    else      room.Player2Answered = nextIdx;
                                 }
                                 else
                                 {
-                                    // Игрок ответил на все вопросы
                                     await bot.SendMessage(chatId,
-                                        "\u23F3 Ты ответил на все вопросы! Ожидаю результатов соперника...",
+                                        $"\u23F3 Ты ответил на все {DuelRoom.TotalQuestions} вопросов! Ожидаю соперника...",
                                         cancellationToken: ct);
                                 }
 
-                                // Проверяем завершение дуэли
+                                // Проверяем завершение — оба ответили на все вопросы
                                 var p1done = room.Player1Answered >= DuelRoom.TotalQuestions;
                                 var p2done = room.Player2Answered >= DuelRoom.TotalQuestions;
 
