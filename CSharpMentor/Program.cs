@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
@@ -36,6 +37,16 @@ var botToken = Environment.GetEnvironmentVariable("TelegramBotToken")
 
 var httpFactory = app.Services.GetRequiredService<IHttpClientFactory>();
 var logger      = app.Services.GetRequiredService<ILogger<Program>>();
+
+// ─────────────────────────────────────────────────────────────
+// Инициализация SQLite БД
+// ─────────────────────────────────────────────────────────────
+var dbPath = Environment.GetEnvironmentVariable("DB_PATH") ?? "/data/mentor.db";
+// Локально храним рядом с приложением
+if (!Directory.Exists(Path.GetDirectoryName(dbPath)!))
+    dbPath = "mentor.db";
+var userDb = new UserDb(dbPath);
+logger.LogInformation("SQLite БД: {Path}", dbPath);
 
 // ─────────────────────────────────────────────────────────────
 // Системные промпты
@@ -214,11 +225,14 @@ var userStates = new ConcurrentDictionary<long, UserState>();
 
 UserState GetState(long userId, string? username = null)
 {
+    var isNew = !userStates.ContainsKey(userId);
     var state = userStates.GetOrAdd(userId, _ => new UserState());
     state.LastActivity = DateTime.UtcNow;
-    // Обновляем имя если передано
     if (!string.IsNullOrWhiteSpace(username))
         state.Username = username;
+    // Загружаем из БД только один раз при первом обращении
+    if (isNew)
+        userDb.LoadUser(userId, state);
     return state;
 }
 
@@ -246,6 +260,9 @@ void AddPoints(UserState state, int points, string reason = "")
     if (!string.IsNullOrEmpty(reason))
         logger.LogInformation("Points +{P} ({R}) → total {T} for {U}",
             points, reason, state.TotalPoints, state.Username);
+    // Сохраняем в БД — найдём userId через userStates
+    var userId = userStates.FirstOrDefault(kv => kv.Value == state).Key;
+    if (userId != 0) userDb.SaveUser(userId, state);
 }
 
 void UpdateStreak(UserState state)
@@ -281,11 +298,8 @@ static (string Title, string Emoji) GetLevel(int points) => points switch
 // Топ-10 пользователей
 string GetLeaderboard()
 {
-    var top = userStates
-        .Where(kv => kv.Value.TotalPoints > 0 && !string.IsNullOrWhiteSpace(kv.Value.Username))
-        .OrderByDescending(kv => kv.Value.TotalPoints)
-        .Take(10)
-        .ToList();
+    // Берём из БД — там актуальные данные
+    var top = userDb.GetTopUsers(10);
 
     if (top.Count == 0)
         return "\U0001F3C6 *Таблица лидеров пуста*\n\nБудь первым — пройди квиз или урок!";
@@ -296,11 +310,11 @@ string GetLeaderboard()
     var medals = new[] { "\U0001F947", "\U0001F948", "\U0001F949" };
     for (int i = 0; i < top.Count; i++)
     {
-        var (uid, s) = (top[i].Key, top[i].Value);
+        var (name, pts) = top[i];
         var prefix = i < 3 ? medals[i] : $"{i + 1}\\.";
-        var (title, emoji) = GetLevel(s.TotalPoints);
-        sb.AppendLine($"{prefix} *{EscapeMd(s.Username)}* {emoji}");
-        sb.AppendLine($"    {s.TotalPoints} очков \\| {title}");
+        var (title, emoji) = GetLevel(pts);
+        sb.AppendLine($"{prefix} *{EscapeMd(name)}* {emoji}");
+        sb.AppendLine($"    {pts} очков \\| {title}");
     }
     return sb.ToString();
 }
@@ -569,12 +583,16 @@ async Task<QuizQuestion?> GetNextQuizQuestion(UserState st)
     if (st.UsedQuizTopics.Count >= 10)
         st.UsedQuizTopics.Clear();
 
-    // Запоминаем сам вопрос (первые 80 символов) чтобы Gemini не повторял
+    // Запоминаем вопрос в памяти и в БД
     var qKey = q2.Question.Length > 80 ? q2.Question[..80] : q2.Question;
     if (!st.UsedQuizQuestions.Contains(qKey))
         st.UsedQuizQuestions.Add(qKey);
     if (st.UsedQuizQuestions.Count > 100)
         st.UsedQuizQuestions.RemoveAt(0);
+
+    // Сохраняем в БД
+    var userId = userStates.FirstOrDefault(kv => kv.Value == st).Key;
+    if (userId != 0) userDb.SaveQuestion(userId, q2.Question);
 
     st.QuizTotal++;
     return q2;
@@ -1714,6 +1732,140 @@ app.MapPost("/api/ask", async (AskRequest request) =>
 app.Run();
 
 record AskRequest(string Question);
+
+// ─────────────────────────────────────────────────────────────
+// SQLite — постоянное хранилище данных пользователей
+// ─────────────────────────────────────────────────────────────
+class UserDb
+{
+    private readonly string _connStr;
+
+    public UserDb(string dbPath)
+    {
+        _connStr = $"Data Source={dbPath}";
+        InitDb();
+    }
+
+    private void InitDb()
+    {
+        using var conn = new SqliteConnection(_connStr);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id     INTEGER PRIMARY KEY,
+                username    TEXT NOT NULL DEFAULT '',
+                points      INTEGER NOT NULL DEFAULT 0,
+                quiz_wins   INTEGER NOT NULL DEFAULT 0,
+                challenges  INTEGER NOT NULL DEFAULT 0,
+                lessons     INTEGER NOT NULL DEFAULT 0,
+                streak      INTEGER NOT NULL DEFAULT 0,
+                streak_date TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS quiz_questions (
+                user_id     INTEGER NOT NULL,
+                question    TEXT NOT NULL,
+                PRIMARY KEY (user_id, question)
+            );
+            """;
+        cmd.ExecuteNonQuery();
+    }
+
+    // Загрузить данные пользователя в UserState
+    public void LoadUser(long userId, UserState state)
+    {
+        using var conn = new SqliteConnection(_connStr);
+        conn.Open();
+
+        // Основные данные
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT username, points, quiz_wins, challenges, lessons, streak, streak_date FROM users WHERE user_id = $id";
+        cmd.Parameters.AddWithValue("$id", userId);
+        using var reader = cmd.ExecuteReader();
+        if (reader.Read())
+        {
+            state.Username        = reader.GetString(0);
+            state.TotalPoints     = reader.GetInt32(1);
+            state.QuizWins        = reader.GetInt32(2);
+            state.ChallengesSolved = reader.GetInt32(3);
+            state.LessonsRead     = reader.GetInt32(4);
+            state.CurrentStreak   = reader.GetInt32(5);
+            var dateStr = reader.GetString(6);
+            state.LastStreakDate  = DateTime.TryParse(dateStr, out var d) ? d : DateTime.MinValue;
+        }
+        reader.Close();
+
+        // Виденные вопросы
+        using var cmd2 = conn.CreateCommand();
+        cmd2.CommandText = "SELECT question FROM quiz_questions WHERE user_id = $id";
+        cmd2.Parameters.AddWithValue("$id", userId);
+        using var r2 = cmd2.ExecuteReader();
+        state.UsedQuizQuestions.Clear();
+        while (r2.Read())
+            state.UsedQuizQuestions.Add(r2.GetString(0));
+    }
+
+    // Сохранить данные пользователя
+    public void SaveUser(long userId, UserState state)
+    {
+        using var conn = new SqliteConnection(_connStr);
+        conn.Open();
+        using var tx = conn.BeginTransaction();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO users (user_id, username, points, quiz_wins, challenges, lessons, streak, streak_date)
+            VALUES ($id, $name, $pts, $qw, $ch, $ls, $str, $sdate)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username    = excluded.username,
+                points      = excluded.points,
+                quiz_wins   = excluded.quiz_wins,
+                challenges  = excluded.challenges,
+                lessons     = excluded.lessons,
+                streak      = excluded.streak,
+                streak_date = excluded.streak_date;
+            """;
+        cmd.Parameters.AddWithValue("$id",    userId);
+        cmd.Parameters.AddWithValue("$name",  state.Username);
+        cmd.Parameters.AddWithValue("$pts",   state.TotalPoints);
+        cmd.Parameters.AddWithValue("$qw",    state.QuizWins);
+        cmd.Parameters.AddWithValue("$ch",    state.ChallengesSolved);
+        cmd.Parameters.AddWithValue("$ls",    state.LessonsRead);
+        cmd.Parameters.AddWithValue("$str",   state.CurrentStreak);
+        cmd.Parameters.AddWithValue("$sdate", state.LastStreakDate.ToString("yyyy-MM-dd"));
+        cmd.ExecuteNonQuery();
+
+        tx.Commit();
+    }
+
+    // Сохранить один вопрос
+    public void SaveQuestion(long userId, string question)
+    {
+        var key = question.Length > 80 ? question[..80] : question;
+        using var conn = new SqliteConnection(_connStr);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT OR IGNORE INTO quiz_questions (user_id, question) VALUES ($id, $q)";
+        cmd.Parameters.AddWithValue("$id", userId);
+        cmd.Parameters.AddWithValue("$q",  key);
+        cmd.ExecuteNonQuery();
+    }
+
+    // Топ пользователей для лидерборда
+    public List<(string Name, int Points)> GetTopUsers(int limit = 10)
+    {
+        using var conn = new SqliteConnection(_connStr);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT username, points FROM users WHERE points > 0 AND username != '' ORDER BY points DESC LIMIT $lim";
+        cmd.Parameters.AddWithValue("$lim", limit);
+        using var r = cmd.ExecuteReader();
+        var result = new List<(string, int)>();
+        while (r.Read())
+            result.Add((r.GetString(0), r.GetInt32(1)));
+        return result;
+    }
+}
 
 // ─────────────────────────────────────────────────────────────
 // Типы данных (должны быть после top-level statements)
