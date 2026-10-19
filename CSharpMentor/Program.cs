@@ -223,6 +223,65 @@ const string LearnSystemPrompt = """
 // Потокобезопасный словарь: userId → состояние
 var userStates = new ConcurrentDictionary<long, UserState>();
 
+// Дуэли: code → комната, userId → code
+var duelRooms  = new ConcurrentDictionary<string, DuelRoom>();
+var userDuels  = new ConcurrentDictionary<long, string>(); // userId → duelCode
+
+string GenerateDuelCode()
+{
+    const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    var rnd = new Random();
+    return new string(Enumerable.Range(0, 4).Select(_ => chars[rnd.Next(chars.Length)]).ToArray());
+}
+
+// Кнопки для вопроса в дуэли
+InlineKeyboardMarkup GetDuelAnswerKeyboard(string code, int qIndex) => new(new[]
+{
+    new[]
+    {
+        InlineKeyboardButton.WithCallbackData("A", $"duel_ans_{code}_{qIndex}_A"),
+        InlineKeyboardButton.WithCallbackData("B", $"duel_ans_{code}_{qIndex}_B"),
+        InlineKeyboardButton.WithCallbackData("C", $"duel_ans_{code}_{qIndex}_C"),
+        InlineKeyboardButton.WithCallbackData("D", $"duel_ans_{code}_{qIndex}_D"),
+    }
+});
+
+// Отправить вопрос дуэли одному игроку
+async Task SendDuelQuestion(ITelegramBotClient bot, long chatId, DuelRoom room, int qIdx, CancellationToken ct)
+{
+    var q   = room.Questions[qIdx];
+    var sb  = new StringBuilder();
+    sb.AppendLine($"\u2694\uFE0F *Дуэль [{room.Code}]* — вопрос {qIdx + 1}/{DuelRoom.TotalQuestions}");
+    sb.AppendLine();
+    sb.AppendLine(q.Question);
+    if (!string.IsNullOrWhiteSpace(q.Code))
+    {
+        sb.AppendLine();
+        sb.AppendLine("```csharp");
+        sb.AppendLine(q.Code);
+        sb.AppendLine("```");
+    }
+    sb.AppendLine();
+    sb.AppendLine($"A) {q.A}");
+    sb.AppendLine($"B) {q.B}");
+    sb.AppendLine($"C) {q.C}");
+    sb.AppendLine($"D) {q.D}");
+
+    try
+    {
+        await bot.SendMessage(chatId, sb.ToString(),
+            parseMode: ParseMode.Markdown,
+            replyMarkup: GetDuelAnswerKeyboard(room.Code, qIdx),
+            cancellationToken: ct);
+    }
+    catch
+    {
+        await bot.SendMessage(chatId, sb.ToString(),
+            replyMarkup: GetDuelAnswerKeyboard(room.Code, qIdx),
+            cancellationToken: ct);
+    }
+}
+
 UserState GetState(long userId, string? username = null)
 {
     var isNew = !userStates.ContainsKey(userId);
@@ -1121,6 +1180,121 @@ if (!string.IsNullOrWhiteSpace(botToken))
                         break;
 
                     default:
+                        // duel_ans_{code}_{qIndex}_{choice} — ответ в дуэли
+                        if (data.StartsWith("duel_ans_"))
+                        {
+                            var parts = data.Split('_');
+                            // duel_ans_CODE_QIDX_CHOICE → parts: [duel,ans,CODE,QIDX,CHOICE]
+                            if (parts.Length == 5
+                                && duelRooms.TryGetValue(parts[2], out var room)
+                                && room.Status == DuelStatus.InProgress
+                                && int.TryParse(parts[3], out var qIdx)
+                                && qIdx < room.Questions.Count)
+                            {
+                                var choice   = parts[4];
+                                var isP1     = userId == room.Player1Id;
+                                var isP2     = userId == room.Player2Id;
+                                if (!isP1 && !isP2) break;
+
+                                var q        = room.Questions[qIdx];
+                                var correct  = choice.Equals(q.Correct, StringComparison.OrdinalIgnoreCase);
+                                var myName   = isP1 ? room.Player1Name : room.Player2Name;
+                                var myScore  = isP1 ? room.Player1Score : room.Player2Score;
+                                var myAns    = isP1 ? room.Player1Answered : room.Player2Answered;
+
+                                // Не даём ответить дважды на один вопрос
+                                if (myAns != qIdx) { await bot.AnswerCallbackQuery(query.Id, cancellationToken: ct); break; }
+
+                                // Засчитываем ответ
+                                if (correct)
+                                {
+                                    if (isP1) room.Player1Score++;
+                                    else      room.Player2Score++;
+                                }
+                                if (isP1) room.Player1Answered++;
+                                else      room.Player2Answered++;
+
+                                // Показываем результат этого вопроса
+                                var correctText = q.Correct switch { "A" => q.A, "B" => q.B, "C" => q.C, _ => q.D };
+                                var emoji = correct ? "\u2705" : "\u274C";
+                                await bot.SendMessage(chatId,
+                                    $"{emoji} *{(correct ? "Правильно" : "Неверно")}!*\n" +
+                                    $"Правильный ответ: *{q.Correct})* {correctText}\n\n" +
+                                    $"{q.Explanation}",
+                                    parseMode: ParseMode.Markdown, cancellationToken: ct);
+
+                                // Следующий вопрос или ожидание
+                                var nextIdx = qIdx + 1;
+                                if (nextIdx < DuelRoom.TotalQuestions)
+                                {
+                                    await SendDuelQuestion(bot, chatId, room, nextIdx, ct);
+                                    if (isP1) room.Player1Answered = nextIdx;
+                                    else      room.Player2Answered = nextIdx;
+                                }
+                                else
+                                {
+                                    // Игрок ответил на все вопросы
+                                    await bot.SendMessage(chatId,
+                                        "\u23F3 Ты ответил на все вопросы! Ожидаю результатов соперника...",
+                                        cancellationToken: ct);
+                                }
+
+                                // Проверяем завершение дуэли
+                                var p1done = room.Player1Answered >= DuelRoom.TotalQuestions;
+                                var p2done = room.Player2Answered >= DuelRoom.TotalQuestions;
+
+                                if (p1done && p2done && room.Status == DuelStatus.InProgress)
+                                {
+                                    room.Status = DuelStatus.Finished;
+                                    var s1 = room.Player1Score;
+                                    var s2 = room.Player2Score;
+
+                                    string result1, result2;
+                                    int pts1, pts2;
+
+                                    if (s1 > s2)
+                                    {
+                                        result1 = $"\U0001F3C6 *Победа!*"; pts1 = 30;
+                                        result2 = $"\U0001F614 *Поражение*"; pts2 = 5;
+                                    }
+                                    else if (s2 > s1)
+                                    {
+                                        result1 = $"\U0001F614 *Поражение*"; pts1 = 5;
+                                        result2 = $"\U0001F3C6 *Победа!*"; pts2 = 30;
+                                    }
+                                    else
+                                    {
+                                        result1 = result2 = "\U0001F91D *Ничья!*";
+                                        pts1 = pts2 = 10;
+                                    }
+
+                                    var summary =
+                                        $"\u2694\uFE0F *Дуэль завершена!*\n\n" +
+                                        $"\U0001F535 {room.Player1Name}: *{s1}/{DuelRoom.TotalQuestions}*\n" +
+                                        $"\U0001F534 {room.Player2Name}: *{s2}/{DuelRoom.TotalQuestions}*";
+
+                                    // Отправляем итог обоим
+                                    var st1 = GetState(room.Player1Id);
+                                    var st2 = GetState(room.Player2Id);
+
+                                    await bot.SendMessage(room.Player1Id, $"{summary}\n\n{result1} *+{pts1} очков*",
+                                        parseMode: ParseMode.Markdown, cancellationToken: ct);
+                                    await bot.SendMessage(room.Player2Id, $"{summary}\n\n{result2} *+{pts2} очков*",
+                                        parseMode: ParseMode.Markdown, cancellationToken: ct);
+
+                                    AddPoints(st1, pts1, "дуэль");
+                                    AddPoints(st2, pts2, "дуэль");
+                                    userDb.SaveUser(room.Player1Id, st1);
+                                    userDb.SaveUser(room.Player2Id, st2);
+
+                                    // Чистим комнату
+                                    userDuels.TryRemove(room.Player1Id, out _);
+                                    userDuels.TryRemove(room.Player2Id, out _);
+                                    duelRooms.TryRemove(room.Code, out _);
+                                }
+                            }
+                            break;
+                        }
                         // learn_stage_XXX — выбор этапа
                         if (data.StartsWith("learn_stage_"))
                         {
@@ -1357,6 +1531,126 @@ if (!string.IsNullOrWhiteSpace(botToken))
                     parseMode: ParseMode.Markdown,
                     replyMarkup: GetLearnStagesKeyboard(),
                     cancellationToken: ct);
+                return;
+            }
+
+            // /duel — создать или присоединиться к дуэли
+            if (message.Text != null && (message.Text == "/duel" || message.Text.StartsWith("/duel ")))
+            {
+                // Если уже в дуэли
+                if (userDuels.ContainsKey(msgUserId))
+                {
+                    await bot.SendMessage(msgChatId,
+                        "\u26A0\uFE0F Ты уже в дуэли! Дождись её завершения.",
+                        cancellationToken: ct);
+                    return;
+                }
+
+                var parts = message.Text.Split(' ');
+
+                if (parts.Length == 1)
+                {
+                    // Создаём комнату
+                    var code = GenerateDuelCode();
+                    while (duelRooms.ContainsKey(code)) code = GenerateDuelCode();
+
+                    var room = new DuelRoom
+                    {
+                        Code       = code,
+                        Player1Id  = msgUserId,
+                        Player1Name = username
+                    };
+                    duelRooms[code]      = room;
+                    userDuels[msgUserId] = code;
+
+                    await bot.SendMessage(msgChatId,
+                        $"\u2694\uFE0F *Дуэль создана!*\n\n" +
+                        $"Твой код: `{code}`\n\n" +
+                        $"Отправь этот код сопернику — пусть введёт:\n`/duel {code}`\n\n" +
+                        $"Жду соперника...",
+                        parseMode: ParseMode.Markdown, cancellationToken: ct);
+
+                    // Автоотмена через 5 минут если никто не присоединился
+                    _ = Task.Delay(TimeSpan.FromMinutes(5)).ContinueWith(t =>
+                    {
+                        if (duelRooms.TryGetValue(code, out var r) && r.Status == DuelStatus.WaitingForOpponent)
+                        {
+                            duelRooms.TryRemove(code, out var removed1);
+                            userDuels.TryRemove(msgUserId, out var removed2);
+                            bot.SendMessage(msgChatId,
+                                $"\u23F0 Дуэль `{code}` отменена — никто не присоединился за 5 минут.",
+                                parseMode: ParseMode.Markdown).Wait();
+                        }
+                    });
+                }
+                else
+                {
+                    // Присоединяемся к комнате
+                    var code = parts[1].ToUpper().Trim();
+                    if (!duelRooms.TryGetValue(code, out var room))
+                    {
+                        await bot.SendMessage(msgChatId,
+                            "❌ Комната с таким кодом не найдена или уже завершена.",
+                            cancellationToken: ct);
+                        return;
+                    }
+                    if (room.Status != DuelStatus.WaitingForOpponent)
+                    {
+                        await bot.SendMessage(msgChatId, "❌ Дуэль уже началась или завершена.", cancellationToken: ct);
+                        return;
+                    }
+                    if (room.Player1Id == msgUserId)
+                    {
+                        await bot.SendMessage(msgChatId, "❌ Нельзя сражаться с самим собой.", cancellationToken: ct);
+                        return;
+                    }
+
+                    room.Player2Id   = msgUserId;
+                    room.Player2Name = username;
+                    room.Status      = DuelStatus.InProgress;
+                    userDuels[msgUserId] = code;
+
+                    // Генерируем 5 вопросов для обоих
+                    await bot.SendChatAction(msgChatId, ChatAction.Typing, cancellationToken: ct);
+                    await bot.SendMessage(msgChatId,
+                        $"\u2694\uFE0F *{username}* принял вызов!\n\nГенерирую вопросы...",
+                        parseMode: ParseMode.Markdown, cancellationToken: ct);
+
+                    // Уведомляем первого игрока
+                    await bot.SendMessage(room.Player1Id,
+                        $"\u2694\uFE0F *{username}* принял твой вызов! Дуэль начинается!",
+                        parseMode: ParseMode.Markdown, cancellationToken: ct);
+
+                    // Генерируем 5 уникальных вопросов
+                    var tmpTopics = new List<string>();
+                    var tmpQuestions = new List<string>();
+                    for (int i = 0; i < DuelRoom.TotalQuestions; i++)
+                    {
+                        var q = await GenerateQuizQuestionAsync(tmpTopics, tmpQuestions);
+                        if (q != null)
+                        {
+                            room.Questions.Add(q);
+                            if (!string.IsNullOrWhiteSpace(q.Topic)) tmpTopics.Add(q.Topic);
+                            var qKey = q.Question.Length > 80 ? q.Question[..80] : q.Question;
+                            tmpQuestions.Add(qKey);
+                        }
+                    }
+
+                    if (room.Questions.Count == 0)
+                    {
+                        await bot.SendMessage(msgChatId, "❌ Не удалось сгенерировать вопросы.", cancellationToken: ct);
+                        duelRooms.TryRemove(code, out _);
+                        userDuels.TryRemove(room.Player1Id, out _);
+                        userDuels.TryRemove(msgUserId, out _);
+                        return;
+                    }
+
+                    // Отправляем первый вопрос обоим
+                    await SendDuelQuestion(bot, room.Player1Id, room, 0, ct);
+                    await SendDuelQuestion(bot, msgChatId, room, 0, ct);
+                    room.Player1Answered = 0;
+                    room.Player2Answered = 0;
+                }
                 return;
             }
 
@@ -1685,6 +1979,7 @@ if (!string.IsNullOrWhiteSpace(botToken))
             new BotCommand { Command = "quiz",      Description = "\U0001F3AF Проверить знания" },
             new BotCommand { Command = "challenge", Description = "\U0001F527 Задание: исправь код" },
             new BotCommand { Command = "interview", Description = "\U0001F3A4 Симуляция собеседования" },
+            new BotCommand { Command = "duel",      Description = "\u2694\uFE0F Дуэль с другим игроком" },
             new BotCommand { Command = "top",       Description = "\U0001F3C6 Таблица лидеров" },
             new BotCommand { Command = "profile",   Description = "\U0001F4CA Мой профиль и очки" },
             new BotCommand { Command = "roadmap",   Description = "\U0001F5FA План изучения C#" },
@@ -1732,6 +2027,34 @@ app.MapPost("/api/ask", async (AskRequest request) =>
 app.Run();
 
 record AskRequest(string Question);
+
+// ─────────────────────────────────────────────────────────────
+// Дуэль между двумя пользователями
+// ─────────────────────────────────────────────────────────────
+enum DuelStatus { WaitingForOpponent, InProgress, Finished }
+
+class DuelRoom
+{
+    public string   Code       { get; set; } = "";  // 4-значный код приглашения
+    public long     Player1Id  { get; set; }
+    public string   Player1Name { get; set; } = "";
+    public long     Player2Id  { get; set; }
+    public string   Player2Name { get; set; } = "";
+    public DuelStatus Status   { get; set; } = DuelStatus.WaitingForOpponent;
+
+    // Одинаковые вопросы для обоих игроков
+    public List<QuizQuestion> Questions { get; } = new();
+    public int CurrentQuestionIndex { get; set; } = 0;
+
+    // Ответы и счёт
+    public int Player1Score   { get; set; } = 0;
+    public int Player2Score   { get; set; } = 0;
+    public int Player1Answered { get; set; } = 0; // сколько вопросов ответил
+    public int Player2Answered { get; set; } = 0;
+
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public const int TotalQuestions = 5;
+}
 
 // ─────────────────────────────────────────────────────────────
 // SQLite — постоянное хранилище данных пользователей
